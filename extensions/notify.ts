@@ -1,0 +1,306 @@
+/**
+ * pi-notify-extension
+ *
+ * Alerts you when pi waits for human interaction (agent_end event).
+ *
+ * Features:
+ * - **Sound alert** via terminal bell + native audio player (paplay/pw-play/aplay)
+ * - **Desktop notification** via OSC 777 / Kitty / Windows toast
+ * - **Optional ntfy push notification** when you don't respond within a timeout
+ *
+ * Install:
+ *   cp index.ts ~/.pi/agent/extensions/notify.ts
+ * Then /reload or restart pi.
+ *
+ * Configuration via environment variables (all optional):
+ *   PI_EXT_NOTIFY_SOUND    true/false       (default: true)
+ *   PI_EXT_NTFY_ENABLED    true/false       (default: false)
+ *   PI_EXT_NTFY_TOPIC      string           (default: "")
+ *   PI_EXT_NTFY_SERVER     string           (default: https://ntfy.sh)
+ *   PI_EXT_NTFY_PRIORITY   1-5              (default: 3)
+ *   PI_EXT_NTFY_SOUND      string           (default: default)
+ *   PI_EXT_NTFY_TAGS       comma-separated  (default: robot)
+ *   PI_EXT_NTFY_TIMEOUT_MS milliseconds     (default: 30000 = 30s)
+ */
+
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+
+// ─── Configuration ───────────────────────────────────────────────────────────
+
+interface Config {
+	soundEnabled: boolean;
+	ntfyEnabled: boolean;
+	ntfyTopic: string;
+	ntfyServer: string;
+	ntfyPriority: number;
+	ntfySound: string;
+	ntfyTags: string[];
+	ntfyTimeoutMs: number;
+}
+
+function loadConfig(): Config {
+	const env = (name: string, fallback: string): string =>
+		process.env[`PI_EXT_${name}`] ?? fallback;
+
+	const envBool = (name: string, fallback: boolean): boolean => {
+		const v = process.env[`PI_EXT_${name}`];
+		if (v === undefined) return fallback;
+		return v === "true" || v === "1" || v === "yes";
+	};
+
+	const envInt = (name: string, fallback: number): number => {
+		const v = process.env[`PI_EXT_${name}`];
+		if (v === undefined) return fallback;
+		const n = parseInt(v, 10);
+		return isNaN(n) ? fallback : Math.max(0, n);
+	};
+
+	return {
+		soundEnabled: envBool("NOTIFY_SOUND", true),
+		ntfyEnabled: envBool("NTFY_ENABLED", false),
+		ntfyTopic: env("NTFY_TOPIC", ""),
+		ntfyServer: env("NTFY_SERVER", "https://ntfy.sh"),
+		ntfyPriority: Math.min(5, Math.max(1, envInt("NTFY_PRIORITY", 3))),
+		ntfySound: env("NTFY_SOUND", "default"),
+		ntfyTags: env("NTFY_TAGS", "robot").split(",").map((s) => s.trim()).filter(Boolean),
+		ntfyTimeoutMs: envInt("NTFY_TIMEOUT_MS", 30000),
+	};
+}
+
+
+
+// ─── Sound helpers ───────────────────────────────────────────────────────────
+
+/** Terminal bell (BEL) - works everywhere */
+function terminalBell(): void {
+	process.stdout.write("\x07");
+}
+
+/**
+ * OSC 777 notification (Ghostty, iTerm2, WezTerm, rxvt-unicode).
+ * Most terminals play a sound for this.
+ */
+function notifyOSC777(title: string, body: string): void {
+	process.stdout.write(`\x1b]777;notify;${title};${body}\x07`);
+}
+
+/** Kitty OSC 99 notification */
+function notifyOSC99(title: string, body: string): void {
+	process.stdout.write(`\x1b]99:i=1:d=0;${title}\x1b\\`);
+	process.stdout.write(`\x1b]99:i=1:p=body;${body}\x1b\\`);
+}
+
+/** Windows toast notification via PowerShell */
+function notifyWindows(title: string, body: string): void {
+	const script = `
+$type = "Windows.UI.Notifications"
+$mgr = "[${type}.ToastNotificationManager, ${type}, ContentType = WindowsRuntime]"
+$template = "[${type}.ToastTemplateType]::ToastText01"
+${mgr} > $null
+$xml = [${type}.ToastNotificationManager]::GetTemplateContent(${template})
+$xml.GetElementsByTagName('text')[0].AppendChild($xml.CreateTextNode('${body.replace(/'/g, "''")}')) > $null
+[${type}.ToastNotificationManager]::CreateToastNotifier('${title.replace(/'/g, "''")}').Show([${type}.ToastNotification]::new($xml))
+`;
+	// eslint-disable-next-line @typescript-eslint/no-require-imports
+	const { execFile } = require("node:child_process");
+	execFile("powershell.exe", ["-NoProfile", "-Command", script], { timeout: 5000 });
+}
+
+// ─── Native audio players ────────────────────────────────────────────────────
+
+import { execFileSync, execSync } from "node:child_process";
+import { existsSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+/**
+ * Try to play a sound using a system audio player (paplay, pw-play, aplay, afplay).
+ * Returns true if the sound was played successfully.
+ */
+function playNativeSound(): boolean {
+	const soundFile = findSoundFile();
+	if (!soundFile) {
+		// Fallback: generate a beep via speaker-test or direct PCM tone
+		return playFallbackBeep();
+	}
+
+	const players: Array<{ cmd: string; args: string[] }> = [
+		{ cmd: "paplay", args: [soundFile] },
+		{ cmd: "pw-play", args: [soundFile] },
+		{ cmd: "aplay", args: [soundFile] },
+		{ cmd: "afplay", args: [soundFile] },
+	];
+
+	for (const { cmd, args } of players) {
+		try {
+			execSync(`which ${cmd} 2>/dev/null`, { stdio: "ignore", timeout: 1000 });
+			execFileSync(cmd, args, { stdio: "ignore", timeout: 3000 });
+			return true;
+		} catch {
+			continue;
+		}
+	}
+
+	return false;
+}
+
+/**
+ * Look for bundled sound files (wav) next to this extension.
+ * Order of preference: notification.wav > notify.wav > done.wav > bell.wav
+ */
+function findSoundFile(): string | null {
+	const __dirname = dirname(fileURLToPath(import.meta.url));
+	const candidates = [
+		join(__dirname, "notification.wav"),
+		join(__dirname, "notify.wav"),
+		join(__dirname, "done.wav"),
+		join(__dirname, "bell.wav"),
+	];
+	for (const path of candidates) {
+		if (existsSync(path)) return path;
+	}
+
+	return null;
+}
+
+/**
+ * Fallback: generate an audible beep without requiring any sound files.
+ * Uses speaker-test or generates a raw PCM sine wave piped to aplay.
+ */
+function playFallbackBeep(): boolean {
+	// Try speaker-test for a quick sine wave beep
+	try {
+		execSync("speaker-test -t sine -f 800 -l 1 -p 1 -r 48000 2>/dev/null", {
+			stdio: "ignore",
+			timeout: 2000,
+			shell: true,
+		});
+		return true;
+	} catch {
+		// speaker-test may not exit cleanly, but the sound still plays
+	}
+
+	// Try generating a PCM beep via aplay
+	try {
+		execSync(
+			"perl -e 'for (0..8000) { print pack(\"v\", 32767 * sin($_ * 3.14159 * 800 / 48000)) }' | aplay -r 48000 -f S16_LE -c 1 -t raw 2>/dev/null",
+			{ stdio: "ignore", timeout: 2000, shell: true },
+		);
+		return true;
+	} catch {
+		// No aplay or no audio device
+	}
+
+	return false;
+}
+
+function playSoundAlert(): void {
+	terminalBell();
+
+	// Try native audio player first — this is the primary sound mechanism on Linux
+	const nativePlayed = playNativeSound();
+
+	// Terminal notifications for desktops with visual popups
+	if (process.env.KITTY_WINDOW_ID) {
+		notifyOSC99("Pi", "Agent is waiting for your input");
+	} else if (process.env.WT_SESSION) {
+		notifyWindows("Pi", "Agent is waiting for your input");
+	} else if (!nativePlayed) {
+		// If native sound failed, still try OSC 777 as a last resort
+		notifyOSC777("Pi", "Agent is waiting for your input");
+	}
+}
+
+// ─── ntfy ────────────────────────────────────────────────────────────────────
+
+async function sendNtfy(config: Config): Promise<void> {
+	if (!config.ntfyTopic) {
+		console.error("[pi-notify] ntfy topic not configured");
+		return;
+	}
+
+	try {
+		const params = new URLSearchParams({
+			title: "💭 Pi needs your input",
+			message: "The agent finished and is waiting for you.",
+			priority: String(config.ntfyPriority),
+			tags: config.ntfyTags.join(","),
+		});
+		if (config.ntfySound !== "default") {
+			params.set("sound", config.ntfySound);
+		}
+
+		const url = `${config.ntfyServer.replace(/\/+$/, "")}/${config.ntfyTopic}`;
+		const res = await fetch(url, {
+			method: "POST",
+			headers: { "Content-Type": "application/x-www-form-urlencoded" },
+			body: params.toString(),
+		});
+
+		if (!res.ok) {
+			console.error(`[pi-notify] ntfy push failed: HTTP ${res.status}`);
+		}
+	} catch (err) {
+		console.error(`[pi-notify] ntfy push error:`, err instanceof Error ? err.message : String(err));
+	}
+}
+
+// ─── Extension ───────────────────────────────────────────────────────────────
+
+export default function (pi: ExtensionAPI) {
+	const config = loadConfig();
+
+	console.error(
+		`[pi-notify] loaded (sound=${config.soundEnabled}, ntfy=${config.ntfyEnabled ? `✅ topic=${config.ntfyTopic}, timeout=${config.ntfyTimeoutMs}ms` : "❌"})`,
+	);
+
+	let userRespondedSinceEnd = false;
+	let ntfyTimer: ReturnType<typeof setTimeout> | null = null;
+
+	function clearTimer(): void {
+		if (ntfyTimer !== null) {
+			clearTimeout(ntfyTimer);
+			ntfyTimer = null;
+		}
+	}
+
+	// ── agent_end: agent finished, waiting for user ──────────────────────
+	pi.on("agent_end", async (_event, ctx) => {
+		if (!ctx.hasUI) return;
+
+		userRespondedSinceEnd = false;
+
+		// Skip sound if user cancelled the agent (e.g. by pressing Esc)
+		const wasCancelled = ctx.signal?.aborted ?? false;
+
+		// 1) Sound immediately (only if agent wasn't cancelled)
+		if (config.soundEnabled && !wasCancelled) {
+			playSoundAlert();
+		}
+
+		// 2) Schedule ntfy if no user input arrives in time
+		if (config.ntfyEnabled && config.ntfyTopic) {
+			clearTimer();
+			ntfyTimer = setTimeout(() => {
+				if (!userRespondedSinceEnd) {
+					sendNtfy(config);
+				}
+				ntfyTimer = null;
+			}, config.ntfyTimeoutMs);
+		}
+	});
+
+	// ── input: user typed something → cancel pending ntfy ────────────────
+	pi.on("input", async (event, _ctx) => {
+		if (event.source === "interactive") {
+			userRespondedSinceEnd = true;
+			clearTimer();
+		}
+		return { action: "continue" };
+	});
+
+	// ── Cleanup on shutdown ──────────────────────────────────────────────
+	pi.on("session_shutdown", async () => {
+		clearTimer();
+	});
+}

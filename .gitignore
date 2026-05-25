@@ -1,0 +1,6 @@
+.codesearch.db/
+bin/
+npm/
+sessions/
+litellm-models.json
+run-history.jsonl

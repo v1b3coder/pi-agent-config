@@ -1,0 +1,35 @@
+{
+  "lastChangelogVersion": "0.75.5",
+  "defaultProvider": "litellm",
+  "defaultModel": "beast/big",
+  "compaction": {
+    "enabled": true,
+    "reserveTokens": 16384,
+    "keepRecentTokens": 20000
+  },
+  "packages": [
+    {
+      "source": "npm:pi-provider-litellm",
+      "extensions": [
+        "+dist/index.js"
+      ]
+    },
+    "npm:pi-skill-tavily",
+    {
+      "source": "npm:pi-amplike",
+      "extensions": [
+        "extensions/amp-skills.ts",
+        "extensions/btw.ts",
+        "extensions/handoff.ts",
+        "extensions/modes.ts",
+        "extensions/permissions.ts",
+        "extensions/session-query.ts"
+      ]
+    },
+    "npm:pi-footer",
+    "npm:pi-subagents"
+  ],
+  "env": {
+    "TAVILY_API_KEY": "tvly-dev-REMOVED"
+  }
+}

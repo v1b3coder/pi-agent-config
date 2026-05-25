@@ -1,0 +1,160 @@
+{
+  "version": 1,
+  "enabled": true,
+  "preset": "default",
+  "lines": [
+    [
+      {
+        "id": "cwd-mplnzvrs-cm8989",
+        "type": "cwd",
+        "enabled": true,
+        "options": {
+          "raw": false,
+          "hideWhenEmpty": false,
+          "hideWhenZero": false,
+          "bold": false,
+          "cwdDisplayStyle": "default",
+          "fg": "blue",
+          "bg": "default",
+          "segments": 2
+        }
+      },
+      {
+        "id": "context-bar-mplo3kdl-vov8z6",
+        "type": "context-bar",
+        "enabled": true,
+        "options": {
+          "raw": false,
+          "hideWhenEmpty": false,
+          "hideWhenZero": false,
+          "bold": false,
+          "contextConditionalColors": false,
+          "tokenFormatStyle": "default",
+          "contextBarMode": "default",
+          "fg": "blue",
+          "bg": "default",
+          "warningFg": "yellow",
+          "warningBg": "default",
+          "dangerFg": "red",
+          "dangerBg": "default",
+          "contextWarningPercent": 70,
+          "contextDangerPercent": 90
+        }
+      },
+      {
+        "id": "input-speed-mplo1f95-32vgv8",
+        "type": "input-speed",
+        "enabled": true,
+        "options": {
+          "raw": false,
+          "hideWhenEmpty": false,
+          "hideWhenZero": false,
+          "bold": false,
+          "tokenFormatStyle": "default",
+          "fg": "brightMagenta",
+          "bg": "default"
+        }
+      },
+      {
+        "id": "output-speed-mplo1gs4-yj02gr",
+        "type": "output-speed",
+        "enabled": true,
+        "options": {
+          "raw": false,
+          "hideWhenEmpty": false,
+          "hideWhenZero": false,
+          "bold": false,
+          "tokenFormatStyle": "default",
+          "fg": "brightCyan",
+          "bg": "default"
+        }
+      }
+    ],
+    [
+      {
+        "id": "model-mplo8bkp-mqdfxf",
+        "type": "model",
+        "enabled": true,
+        "options": {
+          "raw": false,
+          "hideWhenEmpty": false,
+          "hideWhenZero": false,
+          "bold": false,
+          "showProvider": false,
+          "fg": "cyan",
+          "bg": "default"
+        }
+      },
+      {
+        "id": "cost-mplo9xzv-cdmke2",
+        "type": "cost",
+        "enabled": true,
+        "options": {
+          "raw": false,
+          "hideWhenEmpty": false,
+          "hideWhenZero": false,
+          "bold": false,
+          "showSubscription": false,
+          "costFormatStyle": "default",
+          "fg": "green",
+          "bg": "default"
+        }
+      },
+      {
+        "id": "session-total-time-mplo9e5y-xo9llw",
+        "type": "session-total-time",
+        "enabled": true,
+        "options": {
+          "raw": false,
+          "hideWhenEmpty": false,
+          "hideWhenZero": false,
+          "bold": false,
+          "fg": "yellow",
+          "bg": "default"
+        }
+      },
+      {
+        "id": "git-branch-mplo8jd5-cxccq9",
+        "type": "git-branch",
+        "enabled": true,
+        "options": {
+          "raw": false,
+          "hideWhenEmpty": false,
+          "hideWhenZero": false,
+          "bold": false,
+          "surroundLeft": "",
+          "surroundRight": "",
+          "gitBranchDisplayStyle": "default",
+          "fg": "magenta",
+          "bg": "default"
+        }
+      },
+      {
+        "id": "git-diff-mplo8m8v-otejkl",
+        "type": "git-diff",
+        "enabled": true,
+        "options": {
+          "raw": false,
+          "hideWhenEmpty": false,
+          "hideWhenZero": false,
+          "bold": false,
+          "fg": "yellow",
+          "bg": "default"
+        }
+      }
+    ]
+  ],
+  "separator": "dot",
+  "separatorFg": "default",
+  "separatorBg": "default",
+  "iconMode": "emoji",
+  "minimalist": false,
+  "terminal": {
+    "widthMode": "full",
+    "colorLevel": "none"
+  },
+  "extensionStatusRow": {
+    "hiddenKeys": [],
+    "knownKeys": []
+  }
+}
