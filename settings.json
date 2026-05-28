@@ -1,7 +1,7 @@
 {
-  "lastChangelogVersion": "0.75.5",
+  "lastChangelogVersion": "0.76.0",
   "defaultProvider": "litellm",
-  "defaultModel": "beast/big",
+  "defaultModel": "deepseek-ai/DeepSeek-V4-Flash",
   "compaction": {
     "enabled": true,
     "reserveTokens": 16384,
@@ -18,18 +18,18 @@
     {
       "source": "npm:pi-amplike",
       "extensions": [
-        "extensions/amp-skills.ts",
         "extensions/btw.ts",
         "extensions/handoff.ts",
         "extensions/modes.ts",
-        "extensions/permissions.ts",
         "extensions/session-query.ts"
       ]
     },
     "npm:pi-footer",
-    "npm:pi-subagents"
+    "npm:pi-subagents",
+    "npm:pi-goal-x"
   ],
   "env": {
     "TAVILY_API_KEY": "tvly-dev-REMOVED"
-  }
+  },
+  "defaultThinkingLevel": "xhigh"
 }

@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "currentMode": "smart",
+  "modes": {
+    "rush": {
+      "provider": "litellm",
+      "modelId": "beast/big",
+      "thinkingLevel": "off"
+    },
+    "smart": {
+      "provider": "litellm",
+      "modelId": "deepseek-ai/DeepSeek-V4-Flash",
+      "thinkingLevel": "medium"
+    },
+    "deep": {
+      "provider": "litellm",
+      "modelId": "deepseek-ai/DeepSeek-V4-Flash",
+      "thinkingLevel": "xhigh"
+    }
+  }
+}
