@@ -22,6 +22,9 @@
         "extensions/handoff.ts",
         "extensions/modes.ts",
         "extensions/session-query.ts"
+      ],
+      "skills": [
+        "-skills/web-search/SKILL.md"
       ]
     },
     "npm:pi-footer",
