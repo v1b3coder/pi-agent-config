@@ -167,15 +167,16 @@ function findSoundFile(): string | null {
  */
 function playFallbackBeep(): boolean {
 	// Try speaker-test for a quick sine wave beep
-	try {
-		execSync("speaker-test -t sine -f 800 -l 1 -p 1 -r 48000 2>/dev/null", {
-			stdio: "ignore",
-			timeout: 2000,
-			shell: true,
-		});
+	// Using spawnSync because speaker-test may exit non-zero even on success
+	const speakerResult = spawnSync("speaker-test", [
+		"-t", "sine", "-f", "800", "-l", "1", "-p", "1", "-r", "48000",
+	], {
+		stdio: "ignore",
+		timeout: 2000,
+	});
+	if (speakerResult.status !== null) {
+		// Process ran and exited (any status) — speaker-test likely did its job
 		return true;
-	} catch {
-		// speaker-test may not exit cleanly, but the sound still plays
 	}
 
 	// Try generating a PCM beep via aplay
@@ -203,8 +204,11 @@ function playSoundAlert(): void {
 		notifyOSC99("Pi", "Agent is waiting for your input");
 	} else if (process.env.WT_SESSION) {
 		notifyWindows("Pi", "Agent is waiting for your input");
-	} else if (!nativePlayed) {
-		// If native sound failed, still try OSC 777 as a last resort
+	}
+
+	// If no native player played, try OSC 777 as a last resort
+	// (in Kitty/Windows we already sent a visual notification, but add OSC 777 too)
+	if (!nativePlayed) {
 		notifyOSC777("Pi", "Agent is waiting for your input");
 	}
 }
