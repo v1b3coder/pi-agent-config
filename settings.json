@@ -1,5 +1,5 @@
 {
-  "lastChangelogVersion": "0.76.0",
+  "lastChangelogVersion": "0.77.0",
   "defaultProvider": "litellm",
   "defaultModel": "deepseek-ai/DeepSeek-V4-Flash",
   "compaction": {
@@ -32,7 +32,11 @@
     "npm:pi-goal-x"
   ],
   "env": {
-    "TAVILY_API_KEY": "tvly-dev-REMOVED"
+    "TAVILY_API_KEY": "tvly-dev-REMOVED",
+    "PI_EXT_NTFY_ENABLED": 1,
+    "PI_EXT_NTFY_TOPIC": "ntfy-topic-removed",
+    "PI_EXT_NTFY_TAGS": "robot",
+    "PI_EXT_NTFY_TIMEOUT_MS": 60000
   },
   "defaultThinkingLevel": "xhigh"
 }
