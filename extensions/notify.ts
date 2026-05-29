@@ -213,6 +213,22 @@ function playSoundAlert(): void {
 	}
 }
 
+// ─── System idle detection ────────────────────────────────────────────────
+
+/**
+ * Get system idle time in milliseconds via xprintidle.
+ * Returns null if xprintidle is not installed or fails.
+ */
+function getUserIdleMs(): number | null {
+	try {
+		const output = execSync("xprintidle", { timeout: 2000, encoding: "utf-8" });
+		const ms = parseInt(output.trim(), 10);
+		return isNaN(ms) ? null : ms;
+	} catch {
+		return null;
+	}
+}
+
 // ─── ntfy ────────────────────────────────────────────────────────────────────
 
 async function sendNtfy(config: Config): Promise<void> {
@@ -262,6 +278,11 @@ async function sendNtfy(config: Config): Promise<void> {
 export default function (pi: ExtensionAPI) {
 	const config = loadConfig();
 
+	// Warn if ntfy is enabled but xprintidle is missing
+	if (config.ntfyEnabled && config.ntfyTopic && getUserIdleMs() === null) {
+		console.error("[pi-notify] ⚠️ xprintidle not found — idle detection won't work. Install it: sudo apt install xprintidle");
+	}
+
 	console.error(
 		`[pi-notify] loaded (sound=${config.soundEnabled}, ntfy=${config.ntfyEnabled ? `✅ topic=${config.ntfyTopic}, timeout=${config.ntfyTimeoutMs}ms` : "❌"})`,
 	);
@@ -290,12 +311,17 @@ export default function (pi: ExtensionAPI) {
 			playSoundAlert();
 		}
 
-		// 2) Schedule ntfy if no user input arrives in time
+		// 2) Schedule ntfy: if no activity since the beep, send after timeout
 		if (config.ntfyEnabled && config.ntfyTopic) {
 			clearTimer();
 			ntfyTimer = setTimeout(() => {
 				if (!userRespondedSinceEnd) {
-					sendNtfy(config);
+					const idleMs = getUserIdleMs();
+					// idle is monotonic: if no mouse/keyboard since beep, idleMs ≥ timeout
+					if (idleMs === null || idleMs >= config.ntfyTimeoutMs) {
+						sendNtfy(config);
+					}
+					// idleMs < timeout → user touched something after beep → skip
 				}
 				ntfyTimer = null;
 			}, config.ntfyTimeoutMs);
