@@ -222,21 +222,31 @@ async function sendNtfy(config: Config): Promise<void> {
 	}
 
 	try {
-		const params = new URLSearchParams({
-			title: "💭 Pi needs your input",
-			message: "The agent finished and is waiting for you.",
-			priority: String(config.ntfyPriority),
-			tags: config.ntfyTags.join(","),
-		});
+		const url = `${config.ntfyServer.replace(/\/+$/, "")}/${config.ntfyTopic}`;
+
+		// Build a descriptive message with hostname and working directory
+		const h = hostname();
+		const cwd = process.cwd();
+		const home = process.env.HOME ?? "";
+		const shortCwd = cwd.startsWith(home) ? `~${cwd.slice(home.length)}` : cwd;
+		const body = `Agent at ${h} finished task in ${shortCwd}`;
+
+		// ntfy expects the POST body to be the plain text message.
+		// Metadata (title, priority, tags, sound) is sent as HTTP headers.
+		// See https://docs.ntfy.sh/publish/
+		const headers: Record<string, string> = {
+			"Title": "Pi needs your input",
+			"Priority": String(config.ntfyPriority),
+			"Tags": config.ntfyTags.join(","),
+		};
 		if (config.ntfySound !== "default") {
-			params.set("sound", config.ntfySound);
+			headers["Sound"] = String(config.ntfySound);
 		}
 
-		const url = `${config.ntfyServer.replace(/\/+$/, "")}/${config.ntfyTopic}`;
 		const res = await fetch(url, {
 			method: "POST",
-			headers: { "Content-Type": "application/x-www-form-urlencoded" },
-			body: params.toString(),
+			headers,
+			body,
 		});
 
 		if (!res.ok) {
