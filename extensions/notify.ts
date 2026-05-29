@@ -24,6 +24,11 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { execFileSync, execSync, execFile, spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
+import { hostname } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 // ─── Configuration ───────────────────────────────────────────────────────────
 
@@ -101,17 +106,10 @@ $xml = [${type}.ToastNotificationManager]::GetTemplateContent(${template})
 $xml.GetElementsByTagName('text')[0].AppendChild($xml.CreateTextNode('${body.replace(/'/g, "''")}')) > $null
 [${type}.ToastNotificationManager]::CreateToastNotifier('${title.replace(/'/g, "''")}').Show([${type}.ToastNotification]::new($xml))
 `;
-	// eslint-disable-next-line @typescript-eslint/no-require-imports
-	const { execFile } = require("node:child_process");
 	execFile("powershell.exe", ["-NoProfile", "-Command", script], { timeout: 5000 });
 }
 
 // ─── Native audio players ────────────────────────────────────────────────────
-
-import { execFileSync, execSync } from "node:child_process";
-import { existsSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 
 /**
  * Try to play a sound using a system audio player (paplay, pw-play, aplay, afplay).
