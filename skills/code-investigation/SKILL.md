@@ -1,6 +1,6 @@
 ---
 name: code-investigation
-description: "Find, understand, navigate, or explore any code — by name, behavior, pattern, or relationship. Covers symbol lookup, semantic search, call graphs, type hierarchies, definitions, and pattern matching. Use when asked to find/search/locate code, understand how something works, trace calls, show implementations, or navigate a codebase. Triggers: 'find', 'search', 'look up', 'where is', 'how does X work', 'what calls X', 'what does X do', 'trace', 'show me', 'navigate'."
+description: "Find, understand, navigate, or explore any code with CodeSearch & CodeGraph — by name, behavior, pattern, or relationship. Covers symbol lookup, semantic search, call graphs, type hierarchies, definitions, and pattern matching. Use when asked to find/search/locate code, understand how something works, trace calls, show implementations, or navigate a codebase. Triggers: 'find', 'search', 'look up', 'where is', 'how does X work', 'what calls X', 'what does X do', 'trace', 'show me', 'navigate'."
 ---
 
 # Code Investigation
