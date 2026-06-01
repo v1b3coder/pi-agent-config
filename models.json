@@ -6,11 +6,8 @@
           "reasoning": true,
           "thinkingLevelMap": {
             "off": null,
-            "minimal": "low",
-            "low": "medium",
             "medium": "high",
-            "high": "high",
-            "xhigh": "max"
+            "high": "max"
           },
           "compat": {
             "thinkingFormat": "deepseek"
