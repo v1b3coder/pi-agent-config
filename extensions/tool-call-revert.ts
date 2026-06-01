@@ -49,6 +49,16 @@ interface GrammarRegistration {
 }
 
 // =============================================================================
+// Constants
+// =============================================================================
+
+const MAX_REVERT_ATTEMPTS = 5;
+const MAX_FINGERPRINTS = 50;
+
+/** Distinctive customType for the internal retry-trigger message */
+const REVERT_CUSTOM_TYPE = "tool-call-revert";
+
+// =============================================================================
 // Extension
 // =============================================================================
 
@@ -89,16 +99,15 @@ export default function (pi: ExtensionAPI) {
 	// State
 	// =========================================================================
 
-	const MAX_REVERT_ATTEMPTS = 5;
-
 	/** Consecutive revert-retry attempts (reset on any clean message) */
 	let revertAttempts = 0;
 
-	/** Fingerprint of the bad assistant message content (first 200 chars) */
-	let badMessageFingerprint: string | null = null;
-
-	/** Whether we have a pending revert-retry cycle */
-	let pendingRetry = false;
+	/**
+	 * Set of bad assistant fingerprints (first 200 chars of text content).
+	 * Accumulated across revert cycles so the context filter can always
+	 * identify and remove bad responses on ANY turn — not just the retry.
+	 */
+	let badFingerprints = new Set<string>();
 
 	// =========================================================================
 	// Step 1: Detect on agent_end
@@ -143,84 +152,94 @@ export default function (pi: ExtensionAPI) {
 				"error",
 			);
 			revertAttempts = 0;
-			pendingRetry = false;
-			badMessageFingerprint = null;
+			badFingerprints.clear();
 			return;
 		}
 
-		// Found a bad response — prepare the revert
-		badMessageFingerprint = allText.slice(0, 200);
-		pendingRetry = true;
+		// Found a bad response — store its fingerprint for the context filter
+		const fingerprint = allText.slice(0, 200);
+		badFingerprints.add(fingerprint);
+		if (badFingerprints.size > MAX_FINGERPRINTS) {
+			// Evict oldest entries (Set iteration order = insertion order)
+			const first = badFingerprints.values().next().value;
+			if (first) badFingerprints.delete(first);
+		}
 
 		ctx.ui.notify(
 			`⚠️ [${matchedLabel}] Attempt ${revertAttempts}/${MAX_REVERT_ATTEMPTS} — reverting and retrying...`,
 			"warning",
 		);
 
-		pi.sendUserMessage(
-			"[internal tool-call-revert: re-respond to the previous request using proper tool_use blocks]",
+		// Trigger retry via pi.sendMessage with a distinctive customType.
+		// The context handler (Step 2) removes this message from the LLM context
+		// by matching its customType — no content text matching needed.
+		// Using sendMessage (not sendUserMessage) gives us a structured
+		// customType property that survives deep cloning.
+		pi.sendMessage(
+			{
+				customType: REVERT_CUSTOM_TYPE,
+				content: "",
+				display: false,
+			},
 			{ deliverAs: "followUp" },
 		);
 	});
 
 	// =========================================================================
-	// Step 2: Clean the context on the retry LLM call
+	// Step 1.5: Reset counter after every successful tool call
+	// =========================================================================
+
+	pi.on("tool_execution_end", async (event) => {
+		if (!event.isError) {
+			revertAttempts = 0;
+		}
+	});
+
+	// =========================================================================
+	// Step 2: Clean the context on EVERY LLM call
+	//
+	// Unlike the previous approach (which only filtered during pendingRetry),
+	// this filter runs unconditionally. This is critical because:
+	//   - The bad assistant response is persisted to the session
+	//   - On subsequent turns (new user prompts), ALL session messages are
+	//     included in context — including the bad response
+	//   - The filter removes any assistant message whose text matches a
+	//     known bad fingerprint, PLUS any custom messages with our
+	//     revert customType
+	//
+	// This ensures the model NEVER sees the bad response or the internal
+	// retry message, not even on future turns.
 	// =========================================================================
 
 	pi.on("context", async (event) => {
-		if (!pendingRetry) return;
-
 		const messages = event.messages;
-		let foundBad = false;
-		let foundInternal = false;
+		const hasBadFingerprints = badFingerprints.size > 0;
+
+		// Fast path: nothing to filter
+		if (!hasBadFingerprints && !messages.some((m: any) => m.role === "custom" && m.customType === REVERT_CUSTOM_TYPE)) {
+			return;
+		}
 
 		const filtered = messages.filter((m: any) => {
-			// Remove the bad assistant response (match by fingerprint)
-			if (!foundBad && m.role === "assistant") {
+			// Remove any assistant message matching a known bad fingerprint
+			if (hasBadFingerprints && m.role === "assistant") {
 				const text = extractAssistantText(m);
-				if (text && badMessageFingerprint && text.startsWith(badMessageFingerprint)) {
-					foundBad = true;
+				if (text && badFingerprints.has(text.slice(0, 200))) {
 					return false;
 				}
 			}
 
-			// Remove the internal retry user message (match by exact content)
-			if (
-				!foundInternal &&
-				m.role === "user" &&
-				m.content ===
-					"[internal tool-call-revert: re-respond to the previous request using proper tool_use blocks]"
-			) {
-				foundInternal = true;
-				return false;
-			}
-
-			// Same check for content as array (pi.sendUserMessage may stringify)
-			if (
-				!foundInternal &&
-				m.role === "user" &&
-				typeof m.content === "object" &&
-				Array.isArray(m.content) &&
-				m.content.length === 1 &&
-				m.content[0]?.type === "text" &&
-				m.content[0]?.text ===
-					"[internal tool-call-revert: re-respond to the previous request using proper tool_use blocks]"
-			) {
-				foundInternal = true;
+			// Remove any custom message from our revert mechanism
+			// Filtered by structured customType — reliable, not fragile content matching
+			if (m.role === "custom" && m.customType === REVERT_CUSTOM_TYPE) {
 				return false;
 			}
 
 			return true;
 		});
 
-		if (foundBad && foundInternal) {
-			pendingRetry = false;
-			badMessageFingerprint = null;
-			return { messages: filtered };
-		}
-
-		if (foundBad) {
-			// Bad message found but internal retry not yet — keep pendingRetry
+		// Only return filtered if we actually changed something
+		if (filtered.length !== messages.length) {
 			return { messages: filtered };
 		}
 	});

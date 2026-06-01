@@ -256,7 +256,18 @@ async function getUserIdleMs(): Promise<number | null> {
 
 // ─── ntfy ────────────────────────────────────────────────────────────────────
 
-async function sendNtfy(config: Config): Promise<void> {
+function getMessageText(msg: any): string {
+	if (typeof msg.content === "string") return msg.content;
+	if (Array.isArray(msg.content)) {
+		return msg.content
+			.filter((part: any) => part.type === "text")
+			.map((part: any) => part.text)
+			.join(" ");
+	}
+	return "";
+}
+
+async function sendNtfy(config: Config, lastMessageSnippet: string): Promise<void> {
 	if (!config.ntfyTopic) {
 		console.error("[pi-notify] ntfy topic not configured");
 		return;
@@ -270,7 +281,10 @@ async function sendNtfy(config: Config): Promise<void> {
 		const cwd = process.cwd();
 		const home = process.env.HOME ?? "";
 		const shortCwd = cwd.startsWith(home) ? `~${cwd.slice(home.length)}` : cwd;
-		const body = `Agent at ${h} finished task in ${shortCwd}`;
+		let body = `Agent at ${h} finished task in ${shortCwd}`;
+		if (lastMessageSnippet) {
+			body += ` — "${lastMessageSnippet}"`;
+		}
 
 		// ntfy expects the POST body to be the plain text message.
 		// Metadata (title, priority, tags, sound) is sent as HTTP headers.
@@ -327,7 +341,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	// ── agent_end: agent finished, waiting for user ──────────────────────
-	pi.on("agent_end", async (_event, ctx) => {
+	pi.on("agent_end", async (event, ctx) => {
 		if (!ctx.hasUI) return;
 
 		userRespondedSinceEnd = false;
@@ -343,12 +357,17 @@ export default function (pi: ExtensionAPI) {
 		// 2) Schedule ntfy: if no activity since the beep, send after timeout
 		if (config.ntfyEnabled && config.ntfyTopic) {
 			clearTimer();
+
+			// Extract last assistant message snippet
+			const lastAssistantMsg = event.messages?.filter((m: any) => m.role === "assistant").pop();
+			const lastMessageSnippet = lastAssistantMsg ? getMessageText(lastAssistantMsg).slice(0, 30).trim() : "";
+
 			ntfyTimer = setTimeout(async () => {
 				if (!userRespondedSinceEnd) {
 					const idleMs = await getUserIdleMs();
 					// idle is monotonic: if no mouse/keyboard since beep, idleMs ≥ timeout
 					if (idleMs === null || idleMs >= config.ntfyTimeoutMs) {
-						await sendNtfy(config);
+						await sendNtfy(config, lastMessageSnippet);
 					}
 					// idleMs < timeout → user touched something after beep → skip
 				}
