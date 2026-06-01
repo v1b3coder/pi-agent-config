@@ -4,3 +4,5 @@ npm/
 sessions/
 litellm-models.json
 run-history.jsonl
+mcp-cache.json
+pi-crash.log
