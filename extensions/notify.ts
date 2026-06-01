@@ -276,15 +276,14 @@ async function sendNtfy(config: Config, lastMessageSnippet: string): Promise<voi
 	try {
 		const url = `${config.ntfyServer.replace(/\/+$/, "")}/${config.ntfyTopic}`;
 
-		// Build a descriptive message with hostname and working directory
+		// Compact format: hostname (folder): message
 		const h = hostname();
 		const cwd = process.cwd();
 		const home = process.env.HOME ?? "";
 		const shortCwd = cwd.startsWith(home) ? `~${cwd.slice(home.length)}` : cwd;
-		let body = `Agent at ${h} finished task in ${shortCwd}`;
-		if (lastMessageSnippet) {
-			body += ` — "${lastMessageSnippet}"`;
-		}
+		const body = lastMessageSnippet
+			? `${h} (${shortCwd}): ${lastMessageSnippet}`
+			: `${h} (${shortCwd})`;
 
 		// ntfy expects the POST body to be the plain text message.
 		// Metadata (title, priority, tags, sound) is sent as HTTP headers.
