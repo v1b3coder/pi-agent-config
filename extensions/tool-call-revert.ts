@@ -100,9 +100,6 @@ export default function (pi: ExtensionAPI) {
 	/** Whether we have a pending revert-retry cycle */
 	let pendingRetry = false;
 
-	/** Label of the grammar that triggered the last revert */
-	let triggeredLabel = "";
-
 	// =========================================================================
 	// Step 1: Detect on agent_end
 	// =========================================================================
@@ -154,7 +151,6 @@ export default function (pi: ExtensionAPI) {
 		// Found a bad response — prepare the revert
 		badMessageFingerprint = allText.slice(0, 200);
 		pendingRetry = true;
-		triggeredLabel = matchedLabel;
 
 		ctx.ui.notify(
 			`⚠️ [${matchedLabel}] Attempt ${revertAttempts}/${MAX_REVERT_ATTEMPTS} — reverting and retrying...`,
