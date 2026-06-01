@@ -42,30 +42,44 @@
         }
       },
       {
-        "id": "input-speed-mplo1f95-32vgv8",
-        "type": "input-speed",
+        "id": "compactions-mpuj981n-8933r9",
+        "type": "compactions",
         "enabled": true,
         "options": {
-          "raw": false,
+          "raw": true,
           "hideWhenEmpty": false,
           "hideWhenZero": false,
           "bold": false,
-          "tokenFormatStyle": "default",
-          "fg": "brightMagenta",
+          "fg": "yellow",
           "bg": "default"
         }
       },
       {
-        "id": "output-speed-mplo1gs4-yj02gr",
-        "type": "output-speed",
-        "enabled": true,
+        "id": "tokens-mpuj7sqm-gtw8yj",
+        "type": "tokens",
+        "enabled": false,
         "options": {
           "raw": false,
           "hideWhenEmpty": false,
           "hideWhenZero": false,
           "bold": false,
           "tokenFormatStyle": "default",
-          "fg": "brightCyan",
+          "fg": "cyan",
+          "bg": "default"
+        }
+      },
+      {
+        "id": "event-mpt4f18o-g8tfmp",
+        "type": "event",
+        "enabled": true,
+        "options": {
+          "raw": false,
+          "hideWhenEmpty": false,
+          "hideWhenZero": false,
+          "bold": false,
+          "text": "-",
+          "widgetId": "perf-speed",
+          "fg": "default",
           "bg": "default"
         }
       }
@@ -114,6 +128,19 @@
         }
       },
       {
+        "id": "git-remote-mpujaor9-1vvk6w",
+        "type": "git-remote",
+        "enabled": true,
+        "options": {
+          "raw": false,
+          "hideWhenEmpty": false,
+          "hideWhenZero": false,
+          "bold": false,
+          "fg": "cyan",
+          "bg": "default"
+        }
+      },
+      {
         "id": "git-branch-mplo8jd5-cxccq9",
         "type": "git-branch",
         "enabled": true,
@@ -144,17 +171,19 @@
       }
     ]
   ],
-  "separator": "dot",
+  "separator": "pipe",
   "separatorFg": "default",
   "separatorBg": "default",
   "iconMode": "emoji",
-  "minimalist": false,
+  "minimalist": true,
   "terminal": {
     "widthMode": "full",
     "colorLevel": "none"
   },
   "extensionStatusRow": {
     "hiddenKeys": [],
-    "knownKeys": []
+    "knownKeys": [
+      "mcp"
+    ]
   }
 }
