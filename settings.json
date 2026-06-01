@@ -1,10 +1,10 @@
 {
-  "lastChangelogVersion": "0.77.0",
+  "lastChangelogVersion": "0.78.0",
   "defaultProvider": "litellm",
   "defaultModel": "deepseek-ai/DeepSeek-V4-Flash",
   "compaction": {
     "enabled": true,
-    "reserveTokens": 16384,
+    "reserveTokens": 32768,
     "keepRecentTokens": 20000
   },
   "packages": [
@@ -24,13 +24,21 @@
         "extensions/session-query.ts"
       ],
       "skills": [
-        "-skills/web-search/SKILL.md"
+        "-skills/web-search/SKILL.md",
+        "-skills/visit-webpage/SKILL.md"
       ]
     },
     "npm:pi-footer",
     "npm:pi-subagents",
-    "npm:pi-goal-x"
+    "npm:pi-goal-x",
+    "npm:pi-mcp-adapter",
+    "npm:pi-agentic-compaction"
   ],
+  "pi-agentic-compaction": {
+    "models": [
+      "deepseek-ai/DeepSeek-V4-Flash"
+    ]
+  },
   "env": {
     "TAVILY_API_KEY": "tvly-dev-REMOVED",
     "PI_EXT_NTFY_ENABLED": 1,
@@ -38,5 +46,17 @@
     "PI_EXT_NTFY_TAGS": "robot",
     "PI_EXT_NTFY_TIMEOUT_MS": 60000
   },
-  "defaultThinkingLevel": "xhigh"
+  "defaultThinkingLevel": "medium",
+  "showHardwareCursor": false,
+  "enableInstallTelemetry": true,
+  "terminal": {
+    "showTerminalProgress": true
+  },
+  "steeringMode": "one-at-a-time",
+  "followUpMode": "one-at-a-time",
+  "transport": "auto",
+  "hideThinkingBlock": false,
+  "collapseChangelog": false,
+  "quietStartup": false,
+  "doubleEscapeAction": "tree"
 }
