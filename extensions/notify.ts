@@ -24,7 +24,7 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { execFileSync, execSync, execFile, spawnSync } from "node:child_process";
+import { execFile, exec, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
@@ -111,11 +111,37 @@ $xml.GetElementsByTagName('text')[0].AppendChild($xml.CreateTextNode('${body.rep
 
 // ─── Native audio players ────────────────────────────────────────────────────
 
+function execFileAsync(cmd: string, args: string[], options?: object): Promise<{ stdout: string; stderr: string }> {
+	return new Promise((resolve, reject) => {
+		const child = execFile(cmd, args, options as any, (err, stdout, stderr) => {
+			if (err) reject(err);
+			else resolve({ stdout, stderr });
+		});
+	});
+}
+
+function execAsync(cmd: string, options?: object): Promise<{ stdout: string; stderr: string }> {
+	return new Promise((resolve, reject) => {
+		exec(cmd, options as any, (err, stdout, stderr) => {
+			if (err) reject(err);
+			else resolve({ stdout, stderr });
+		});
+	});
+}
+
+function spawnAsync(cmd: string, args: string[], options?: object): Promise<number | null> {
+	return new Promise((resolve, reject) => {
+		const child = spawn(cmd, args, options as any);
+		child.on("close", (code) => resolve(code));
+		child.on("error", reject);
+	});
+}
+
 /**
  * Try to play a sound using a system audio player (paplay, pw-play, aplay, afplay).
  * Returns true if the sound was played successfully.
  */
-function playNativeSound(): boolean {
+async function playNativeSound(): Promise<boolean> {
 	const soundFile = findSoundFile();
 	if (!soundFile) {
 		// Fallback: generate a beep via speaker-test or direct PCM tone
@@ -131,8 +157,7 @@ function playNativeSound(): boolean {
 
 	for (const { cmd, args } of players) {
 		try {
-			execSync(`which ${cmd} 2>/dev/null`, { stdio: "ignore", timeout: 1000 });
-			execFileSync(cmd, args, { stdio: "ignore", timeout: 3000 });
+			await execFileAsync(cmd, args, { stdio: "ignore", timeout: 3000 });
 			return true;
 		} catch {
 			continue;
@@ -165,23 +190,23 @@ function findSoundFile(): string | null {
  * Fallback: generate an audible beep without requiring any sound files.
  * Uses speaker-test or generates a raw PCM sine wave piped to aplay.
  */
-function playFallbackBeep(): boolean {
+async function playFallbackBeep(): Promise<boolean> {
 	// Try speaker-test for a quick sine wave beep
-	// Using spawnSync because speaker-test may exit non-zero even on success
-	const speakerResult = spawnSync("speaker-test", [
-		"-t", "sine", "-f", "800", "-l", "1", "-p", "1", "-r", "48000",
-	], {
-		stdio: "ignore",
-		timeout: 2000,
-	});
-	if (speakerResult.status !== null) {
-		// Process ran and exited (any status) — speaker-test likely did its job
-		return true;
+	try {
+		const code = await spawnAsync("speaker-test", [
+			"-t", "sine", "-f", "800", "-l", "1", "-p", "1", "-r", "48000",
+		], {
+			stdio: "ignore",
+			timeout: 2000,
+		});
+		if (code !== null) return true;
+	} catch {
+		// fall through to aplay beep
 	}
 
 	// Try generating a PCM beep via aplay
 	try {
-		execSync(
+		await execAsync(
 			"perl -e 'for (0..8000) { print pack(\"v\", 32767 * sin($_ * 3.14159 * 800 / 48000)) }' | aplay -r 48000 -f S16_LE -c 1 -t raw 2>/dev/null",
 			{ stdio: "ignore", timeout: 2000, shell: true },
 		);
@@ -193,11 +218,11 @@ function playFallbackBeep(): boolean {
 	return false;
 }
 
-function playSoundAlert(): void {
+async function playSoundAlert(): Promise<void> {
 	terminalBell();
 
 	// Try native audio player first — this is the primary sound mechanism on Linux
-	const nativePlayed = playNativeSound();
+	const nativePlayed = await playNativeSound();
 
 	// Terminal notifications for desktops with visual popups
 	if (process.env.KITTY_WINDOW_ID) {
@@ -219,10 +244,10 @@ function playSoundAlert(): void {
  * Get system idle time in milliseconds via xprintidle.
  * Returns null if xprintidle is not installed or fails.
  */
-function getUserIdleMs(): number | null {
+async function getUserIdleMs(): Promise<number | null> {
 	try {
-		const output = execSync("xprintidle", { timeout: 2000, encoding: "utf-8" });
-		const ms = parseInt(output.trim(), 10);
+		const { stdout } = await execFileAsync("xprintidle", [], { timeout: 2000, encoding: "utf-8" });
+		const ms = parseInt(stdout.trim(), 10);
 		return isNaN(ms) ? null : ms;
 	} catch {
 		return null;
@@ -279,8 +304,12 @@ export default function (pi: ExtensionAPI) {
 	const config = loadConfig();
 
 	// Warn if ntfy is enabled but xprintidle is missing
-	if (config.ntfyEnabled && config.ntfyTopic && getUserIdleMs() === null) {
-		console.error("[pi-notify] ⚠️ xprintidle not found — idle detection won't work. Install it: sudo apt install xprintidle");
+	if (config.ntfyEnabled && config.ntfyTopic) {
+		getUserIdleMs().then((idleMs) => {
+			if (idleMs === null) {
+				console.error("[pi-notify] ⚠️ xprintidle not found — idle detection won't work. Install it: sudo apt install xprintidle");
+			}
+		});
 	}
 
 	console.error(
@@ -308,18 +337,18 @@ export default function (pi: ExtensionAPI) {
 
 		// 1) Sound immediately (only if agent wasn't cancelled)
 		if (config.soundEnabled && !wasCancelled) {
-			playSoundAlert();
+			await playSoundAlert();
 		}
 
 		// 2) Schedule ntfy: if no activity since the beep, send after timeout
 		if (config.ntfyEnabled && config.ntfyTopic) {
 			clearTimer();
-			ntfyTimer = setTimeout(() => {
+			ntfyTimer = setTimeout(async () => {
 				if (!userRespondedSinceEnd) {
-					const idleMs = getUserIdleMs();
+					const idleMs = await getUserIdleMs();
 					// idle is monotonic: if no mouse/keyboard since beep, idleMs ≥ timeout
 					if (idleMs === null || idleMs >= config.ntfyTimeoutMs) {
-						sendNtfy(config);
+						await sendNtfy(config);
 					}
 					// idleMs < timeout → user touched something after beep → skip
 				}
