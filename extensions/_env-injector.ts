@@ -1,28 +1,36 @@
 /**
- * _env-injector — injects settings.json "env" block into process.env
+ * _env-injector — injects env vars from settings.json + .env / .env.local
  *
- * Loads before other extensions (sorted first alphabetically), reads both
- * global and project settings files, and applies their "env" values to
- * process.env. Values undergo shell-like variable expansion so that
- * "$VAR", "${VAR}", and "$$" work as expected.
+ * Loads before other extensions (sorted first alphabetically), reads:
+ *   - ~/.pi/agent/settings.json  "env" block
+ *   - .pi/settings.json          "env" block
+ *   - $cwd/.env
+ *   - $cwd/.env.local
  *
- * Priority (later overrides earlier):
- *   1. Already-set process.env values (actual shell env vars)
- *   2. ~/.pi/agent/settings.json  "env" block
- *   3. .pi/settings.json          "env" block
+ * Values from JSON settings undergo shell-like variable expansion so that
+ * "$VAR", "${VAR}", and "$$" work as expected.  .env files are parsed as
+ * plain KEY=VALUE lines (no expansion).
  *
- * Within each file, keys are applied in JSON iteration order.
+ * Priority (later in the list overrides earlier — i.e. more specific wins):
+ *
+ *    (lowest)  1.  Actual shell / .profile env vars
+ *             2.  ~/.pi/agent/settings.json  "env"   (global Pi settings)
+ *             3.  .pi/settings.json          "env"   (per-project Pi settings)
+ *             4.  $cwd/.env                          (project defaults)
+ *    (highest) 5.  $cwd/.env.local                    (local overrides)
+ *
+ * Within each source, keys are applied in iteration / line order.
  */
 
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-// ─── Variable expansion ─────────────────────────────────────────────────────
+// ─── Variable expansion (settings.json values only) ─────────────────────────
 
 /**
  * Expand $VAR, ${VAR}, and $$ references in a string using the current
- * process.env. Unknown variables are left as-is (e.g. "$UNDEFINED" stays
+ * process.env.  Unknown variables are left as-is (e.g. "$UNDEFINED" stays
  * "$UNDEFINED" so broken configs are visible rather than silently empty).
  */
 function expandVars(value: string): string {
@@ -58,7 +66,6 @@ function expandVars(value: string): string {
     if (ch === "{") {
       const close = value.indexOf("}", i + 1);
       if (close === -1) {
-        // No closing brace — leave as-is
         result += value.slice(dollar);
         break;
       }
@@ -79,19 +86,13 @@ function expandVars(value: string): string {
       continue;
     }
 
-    // Not a valid variable — emit the $ literally
     result += "$";
   }
 
   return result;
 }
 
-// ─── Settings reader ────────────────────────────────────────────────────────
-
-interface SettingsFile {
-  path: string;
-  env: Record<string, string>;
-}
+// ─── Settings reader (settings.json) ────────────────────────────────────────
 
 function loadSettingsEnv(filePath: string): Record<string, string> {
   try {
@@ -112,43 +113,100 @@ function loadSettingsEnv(filePath: string): Record<string, string> {
   }
 }
 
+// ─── .env file parser ───────────────────────────────────────────────────────
+
+/**
+ * Parse a standard .env file (KEY=VALUE lines).
+ *
+ * Handles:
+ *   - `#` line comments
+ *   - `export KEY=VALUE` (strips the export keyword)
+ *   - Single- and double-quoted values (quotes stripped, no interpolation)
+ *   - Leading/trailing whitespace trimming
+ *   - Empty lines
+ *
+ * Does NOT do shell-like expansion inside values (unlike the settings.json
+ * loader above).  This matches the standard dotenv convention.
+ */
+function parseDotenv(text: string): Record<string, string> {
+  const result: Record<string, string> = {};
+
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim();
+
+    // Skip empty lines and comments
+    if (line === "" || line.startsWith("#")) continue;
+
+    // Strip optional `export` prefix
+    const exportMatch = line.match(/^export\s+/);
+    const body = exportMatch ? line.slice(exportMatch[0].length).trimStart() : line;
+
+    // Find the first `=` separator
+    const eqIdx = body.indexOf("=");
+    if (eqIdx === -1) continue; // no value — skip
+
+    const key = body.slice(0, eqIdx).trim();
+    if (!key) continue; // empty key — skip
+
+    let rawValue = body.slice(eqIdx + 1).trim();
+
+    // Strip surrounding quotes
+    if (
+      (rawValue.startsWith('"') && rawValue.endsWith('"')) ||
+      (rawValue.startsWith("'") && rawValue.endsWith("'"))
+    ) {
+      rawValue = rawValue.slice(1, -1);
+    }
+
+    result[key] = rawValue;
+  }
+
+  return result;
+}
+
+function loadDotenvFile(filePath: string): Record<string, string> {
+  try {
+    if (!existsSync(filePath)) return {};
+    const text = readFileSync(filePath, "utf-8");
+    return parseDotenv(text);
+  } catch {
+    return {};
+  }
+}
+
 // ─── Extension factory ──────────────────────────────────────────────────────
 
 export default function (_pi: ExtensionAPI): void {
   const home = process.env.HOME || process.env.USERPROFILE || "";
+  const cwd = process.cwd();
 
-  const files: SettingsFile[] = [
-    {
-      path: join(home, ".pi", "agent", "settings.json"),
-      env: {},
-    },
-    {
-      path: join(process.cwd(), ".pi", "settings.json"),
-      env: {},
-    },
+  // Sources in priority order: later overrides earlier.
+  // Actual shell env vars are the base (tier 1).
+  const sources: Array<{ label: string; vars: Record<string, string> }> = [
+    // Tier 2: global Pi settings
+    { label: "~/.pi/agent/settings.json", vars: loadSettingsEnv(join(home, ".pi", "agent", "settings.json")) },
+    // Tier 3: per-project Pi settings
+    { label: ".pi/settings.json",         vars: loadSettingsEnv(join(cwd, ".pi", "settings.json")) },
+    // Tier 4: project defaults
+    { label: ".env",                      vars: loadDotenvFile(join(cwd, ".env")) },
+    // Tier 5: local overrides (highest)
+    { label: ".env.local",                vars: loadDotenvFile(join(cwd, ".env.local")) },
   ];
 
-  // Load env blocks, later files override earlier ones
+  // Start with current process.env as the base
   const merged: Record<string, string> = {};
+  for (const key of Object.keys(process.env)) {
+    if (process.env[key] !== undefined) merged[key] = process.env[key]!;
+  }
 
-  for (const file of files) {
-    const vars = loadSettingsEnv(file.path);
-    for (const [key, value] of Object.entries(vars)) {
+  for (const source of sources) {
+    for (const [key, value] of Object.entries(source.vars)) {
       merged[key] = value;
     }
   }
 
-  // Apply to process.env (actual shell env vars already in place — we never
-  // unset them; these only fill in what's missing or override empties).
+  // Apply everything back — higher tiers freely override lower ones
   for (const [key, value] of Object.entries(merged)) {
-    // Only set if not already present in the real environment, so actual
-    // shell exports / .profile variables always win.
-    if (process.env[key] === undefined) {
-      process.env[key] = value;
-    }
+    process.env[key] = value;
   }
-
-  console.error(
-    `[_env-injector] injected ${Object.keys(merged).length} env var(s) from settings.json`,
-  );
 }
