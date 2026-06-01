@@ -19,8 +19,14 @@
  * Example:
  *   registerGrammar("my-grammar", {
  *     detect(text) { return /my-pattern/.test(text); },
- *     errorLabel: "Hallucinated tool call detected",
+ *     label: "My Grammar",
  *   });
+ *
+ * ---
+ *
+ * Safety: after 5 consecutive revert attempts the extension gives up to
+ * prevent infinite retry loops and token waste. The counter resets on any
+ * message that does NOT trigger a revert.
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -83,6 +89,11 @@ export default function (pi: ExtensionAPI) {
 	// State
 	// =========================================================================
 
+	const MAX_REVERT_ATTEMPTS = 5;
+
+	/** Consecutive revert-retry attempts (reset on any clean message) */
+	let revertAttempts = 0;
+
 	/** Fingerprint of the bad assistant message content (first 200 chars) */
 	let badMessageFingerprint: string | null = null;
 
@@ -119,14 +130,36 @@ export default function (pi: ExtensionAPI) {
 			}
 		}
 
-		if (!matchedName) return;
+		if (!matchedName) {
+			// Clean message — reset the revert counter
+			revertAttempts = 0;
+			return;
+		}
+
+		// Increment attempt counter
+		revertAttempts++;
+
+		// Check if we've exhausted retries — give up to prevent infinite loop
+		if (revertAttempts >= MAX_REVERT_ATTEMPTS) {
+			ctx.ui.notify(
+				`⚠️ [${matchedLabel}] ${MAX_REVERT_ATTEMPTS} consecutive failures — giving up.`,
+				"error",
+			);
+			revertAttempts = 0;
+			pendingRetry = false;
+			badMessageFingerprint = null;
+			return;
+		}
 
 		// Found a bad response — prepare the revert
 		badMessageFingerprint = allText.slice(0, 200);
 		pendingRetry = true;
 		triggeredLabel = matchedLabel;
 
-		ctx.ui.notify(`⚠️ [${matchedLabel}] Hallucinated tool call — reverting and retrying...`, "warning");
+		ctx.ui.notify(
+			`⚠️ [${matchedLabel}] Attempt ${revertAttempts}/${MAX_REVERT_ATTEMPTS} — reverting and retrying...`,
+			"warning",
+		);
 
 		pi.sendUserMessage(
 			"[internal tool-call-revert: re-respond to the previous request using proper tool_use blocks]",
