@@ -15,7 +15,14 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { Component } from "@earendil-works/pi-tui";
+import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+
+function truncateToWidth(text: string, width: number): string {
+	if (text.length <= width) return text;
+	return text.slice(0, Math.max(0, width - 1)) + "…";
+}
 
 export default function webSearchExtension(pi: ExtensionAPI) {
 	// ─── Quick Search Tool (synchronous) ───────────────────────────────────
@@ -32,6 +39,45 @@ export default function webSearchExtension(pi: ExtensionAPI) {
 			"Set time_range for time-sensitive queries (e.g., 'week', 'day').",
 			"Use search_depth 'ultra-fast' or 'fast' for quick lookups; 'advanced' for thorough research.",
 		],
+
+		renderCall(args, _theme, context) {
+			const text = context.lastComponent ?? new Text("", 0, 0);
+			text.setText(
+				`web_search: ${truncateToWidth(args.query ?? "", 120)}`,
+			);
+			return text;
+		},
+
+		renderResult(
+			result: { content: { type: string; text?: string }[]; details: unknown },
+			options: { expanded: boolean; isPartial: boolean },
+			_theme: any,
+			context: any,
+		): Component {
+			const text = context.lastComponent ?? new Text("", 0, 0);
+			const details = result.details as
+				| {
+						query: string;
+						response_time_sec: number;
+						total_results: number;
+						results?: Array<{ title: string; url: string; score: number }>;
+				  }
+				| undefined;
+
+			if (!options.expanded) {
+				// Collapsed mode: just the result count (renderCall already shows the query)
+				const count = details?.total_results ?? 0;
+				text.setText(`— ${count} result${count !== 1 ? "s" : ""}`);
+			} else {
+				// Expanded mode: show full results
+				const fullText = result
+					.filter((c: any) => c.type === "text")
+					.map((c: any) => c.text ?? "")
+					.join("\n");
+				text.setText(fullText);
+			}
+			return text;
+		},
 		parameters: Type.Object({
 			query: Type.String({
 				description:
@@ -155,7 +201,8 @@ export default function webSearchExtension(pi: ExtensionAPI) {
 
 	// ─── Deep Research Tool (fire-and-forget, async delivery) ──────────────
 
-	pi.registerTool({
+	// DISABLED: web_research tool is hidden from Pi
+	if (false) pi.registerTool({
 		name: "web_research",
 		label: "Web Research",
 		description:
