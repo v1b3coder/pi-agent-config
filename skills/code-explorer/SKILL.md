@@ -1,6 +1,6 @@
 ---
 name: code-explorer
-description: "Three-step code exploration: CodeSearch (find by intent) → CodeGraph (trace relationships) → grep (verify everything). Covers semantic search, symbol lookup, call graphs, type hierarchies, impact analysis, and cross-language tracing. Always use all three — each catches what the others miss. Triggers when the user asks to 'grep', 'search', 'find', 'look up', 'trace', 'navigate', 'where is', 'how does X work', 'what calls X', 'show me', or wants to explore unfamiliar code."
+description: "Use this when the user needs to understand, trace, or explore code — especially unfamiliar codebases, multi-file flows, or architecture questions. Also triggers when CodeSearch or CodeGraph tools are mentioned directly, since this skill manages their index initialization and health checks. Covers: finding where something lives by intent (not just by name), tracing call chains both up and down (who calls X, what does X call), mapping data flows across modules, assessing what breaks if something changes, and navigating large or unfamiliar projects. This is the right skill when the user sounds lost, wants to learn how a feature works end-to-end, asks about dependencies or relationships between components, or needs confidence nothing is hidden before editing. Not for simple file reading, single-symbol lookups, or non-search tasks."
 ---
 
 # Code Explorer
@@ -49,7 +49,7 @@ Don't skip this step. The first two map the territory; this one fills in the det
 
 ---
 
-The rest of this document is reference. Use the 1-2-3 recipe above for every investigation.
+The rest of this document is reference. Use the three-step workflow above for every exploration.
 
 ## CodeGraph — structural
 
