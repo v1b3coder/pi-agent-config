@@ -7,7 +7,11 @@ description: "Use for understanding, tracing, or exploring unfamiliar code — e
 
 Two tools for navigating and understanding code. Use **both** — they complement each other.
 
-> **First step every session:** Run `scripts/init.sh` to ensure indexes are up to date. Idempotent — safe to re-run.
+> **First step every session:** Run `scripts/init.sh` to check index health. Use a **long timeout (≥1800s)** — if indexes need creation, setup may take a while.
+> 
+> **If it exits with code 1 or 2:** Tell the user to copy the `!…/setup.sh` command printed by init.sh and paste it into Pi's chat prompt (the `!` prefix runs it as a shell command). Do NOT run any CodeSearch/CodeGraph commands this round.
+> 
+> Once setup.sh completes, re-run init.sh to verify.
 
 ## The 1-2-3 Recipe
 
@@ -90,7 +94,7 @@ This writes to `~/.codesearch/repos.json`. Alias defaults to directory name if `
 
 ```bash
 scripts/codesearch-server.sh start     # no-op if already running
-codesearch search --group <name> "rate limiting"
+codesearch search --compact --json --rerank --group <name> "rate limiting"
 ```
 
 The daemon auto-discovers all repos from `~/.codesearch/repos.json`. No `--register` flags. Once started, it keeps running — only restart when you change the config. Never stop the daemon; other agents may be using it.
@@ -116,12 +120,13 @@ codesearch stats .             # Shows chunk count, Indexed: ✅
 codesearch groups list         # Shows registered groups (for cross-repo search)
 ```
 
-If `codegraph status .` shows errors or "no index found", re-run `scripts/init.sh`. If `codesearch stats .` shows no results or an empty chunk count, re-index with `codesearch index --force --model bge-small-q .`
+If `codegraph status .` shows errors or "no index found", re-run `scripts/init.sh`.`
 
 ## Available scripts
 
 These live inside the skill, not the working project — run them resolved relative to this SKILL.md:
 
-- **`scripts/init.sh`** — Always run first before calling any CodeGraph or CodeSearch command. **Every session. No exceptions.** Use a **long timeout (≥1800s)** — model download + indexing can take a while. Prints install instructions if tools are missing. Adds `.codegraph/` and `.codesearch.db/` to `.gitignore`.
-- **`scripts/codesearch-server.sh`** — Start/stop/status for the cross-repo search daemon. `start` (or no arg) launches it; `status` checks; `stop` shuts it down. 
+- **`scripts/init.sh`** — Quick health check (fast). Exit code 1 = missing tools, exit code 2 = indexes need setup. Run **every session** before using CodeSearch/CodeGraph.
+- **`scripts/setup.sh`** — One-time index initialization. **Run only on user consent.** Can take an hour+ on large repos. Idempotent — safe to re-run.
+- **`scripts/codesearch-server.sh`** — Start/stop/status for the cross-repo search daemon. `start` (or no arg) launches it; `status` checks; `restart` reloads configuration. 
 
