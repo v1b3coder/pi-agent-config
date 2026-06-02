@@ -38,9 +38,20 @@ if [ -n "$CURRENT_MODEL" ] && [ "$CURRENT_MODEL" != "$MODEL" ]; then
 	rm -rf .codesearch.db
 fi
 
+DB_OK=false
 if [ -d .codesearch.db ] && codesearch stats . >/dev/null 2>&1; then
-	echo "CodeSearch: already initialized ($MODEL)"
-else
+	# Verify the search index is actually usable (not interrupted mid-index)
+	if codesearch search --compact --json "__init_healthcheck" 2>/dev/null | grep -q "results"; then
+		echo "CodeSearch: already initialized ($MODEL)"
+		DB_OK=true
+	fi
+fi
+
+if [ "$DB_OK" != true ]; then
+	if [ -d .codesearch.db ]; then
+		echo "CodeSearch: database broken or incomplete, reindexing..."
+		rm -rf .codesearch.db
+	fi
 	echo "CodeSearch: setting up $MODEL model (code-specific)..."
 	codesearch setup --model "$MODEL" 2>/dev/null
 	echo "CodeSearch: indexing..."
