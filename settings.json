@@ -14,7 +14,14 @@
         "+dist/index.js"
       ]
     },
-    "npm:pi-skill-tavily",
+    {
+      "source": "npm:pi-skill-tavily",
+      "skills": [
+	"skills/tavily-research/SKILL.md",
+        "skills/tavily-search/SKILL.md",
+	"skills/tavily-extract/SKILL.md"
+      ]
+    },
     {
       "source": "npm:pi-amplike",
       "extensions": [
@@ -23,15 +30,12 @@
         "extensions/modes.ts",
         "extensions/session-query.ts"
       ],
-      "skills": [
-        "-skills/web-search/SKILL.md",
-        "-skills/visit-webpage/SKILL.md"
-      ]
+      "skills": []
     },
     "npm:pi-footer",
     "npm:pi-subagents",
     "npm:pi-goal-x",
-    "npm:pi-mcp-adapter",
+    "-npm:pi-mcp-adapter",
     "npm:pi-agentic-compaction"
   ],
   "pi-agentic-compaction": {
@@ -47,13 +51,10 @@
     "PI_EXT_NTFY_TIMEOUT_MS": 60000
   },
   "defaultThinkingLevel": "medium",
-  "showHardwareCursor": false,
-  "enableInstallTelemetry": true,
+  "enableInstallTelemetry": false,
   "terminal": {
     "showTerminalProgress": true
   },
-  "steeringMode": "one-at-a-time",
-  "followUpMode": "one-at-a-time",
   "transport": "auto",
   "hideThinkingBlock": false,
   "collapseChangelog": false,
