@@ -1,45 +1,55 @@
 ---
 name: code-investigation
-description: "Navigate and understand code with CodeSearch & CodeGraph — symbol lookup, semantic search, call graphs, type hierarchies, definitions, impact analysis, and pattern matching across large codebases. Use this FIRST for multi-package monorepos, cross-language investigations, architecture discovery, and semantic search (finding code by intent, not keyword). Falls back to grep/find for exhaustive edge-case coverage in small codebases. Triggers: the user asks to 'grep', 'find', 'search', 'look up', 'trace', 'navigate', 'where is', 'how does X work', 'what calls X', 'what does X do', 'show me', wants to explore an unfamiliar codebase, or investigate a large monorepo."
+description: "Deep code investigation — a 1-2-3 recipe for thorough code exploration: CodeSearch (find by intent) → CodeGraph (trace relationships) → grep (verify exhaustively). Covers semantic search, symbol lookup, call graphs, type hierarchies, definitions, impact analysis, and cross-language tracing. Always use all three steps — they complement each other regardless of project size. Triggers: the user asks to 'grep', 'find', 'search', 'look up', 'trace', 'navigate', 'where is', 'how does X work', 'what calls X', 'what does X do', 'show me', or wants to explore a codebase."
 ---
 
 # Code Investigation
 
 Two tools for navigating and understanding code. Use **both** — they complement each other.
 
-> **First step every session:** Run `scripts/init.sh` (from the skill directory) to ensure indexes are up to date. The script is idempotent and safe to re-run.
+> **First step every session:** Run `scripts/init.sh` to ensure indexes are up to date. Idempotent — safe to re-run.
 
-## When this skill adds value
+## The 1-2-3 Recipe
 
-These tools shine in **specific contexts**. In others, grep/find is equally effective — use the right approach:
+Always do all three steps, in this order. Each catches things the others miss.
 
-| Scenario | Best approach | Why |
-|----------|---------------|-----|
-| **Small project** (<1K files, single language) | grep/find | Exhaustive grep coverage is easy and catches edge cases grep can miss |
-| **Large monorepo** (>5K files) | **CodeSearch first**, then grep to verify | Semantic search finds cross-package connections grep would miss |
-| **Cross-language investigation** | **CodeSearch** + CodeGraph | Semantic search bridges languages; CodeGraph traces structural relationships |
-| **Impact analysis** ("what breaks if I change X?") | **CodeGraph impact**, then grep for docs/error messages | CodeGraph traces transitive dependencies; grep catches human-readable refs |
-| **Architecture discovery** ("how does this system work?") | **CodeSearch + CodeGraph first** | Maps the territory fast; grep fills in implementation details |
-| **Interface + implementations** ("find all types that implement X") | **CodeGraph query + callers** | Structural knowledge finds relationships grep can't |
-| **Simple symbol lookup** ("where is this defined?") | grep (faster for exact match) | Grep is 0.003s vs CodeGraph 0.16s for exact text matches |
+### Step 1: CodeSearch — find by intent
 
-## Quick reference
+Semantic search. Use when you know what the code *does* but not the symbol name.
 
-| Tool | Best for | CLI |
-|------|----------|-----|
-| **CodeGraph** | Structural: symbol definitions, callers/callees, type hierarchies, call graphs, impact analysis | `codegraph query/callers/callees/context` |
-| **CodeSearch** | Semantic: find code by what it *does* (natural language) | `codesearch search` |
-
-## When to use which
-
+```bash
+codesearch search --compact --json --rerank "what the code does"
 ```
-You know the symbol name?           → CodeGraph (query, callers, callees)
-You know what the code DOES?        → CodeSearch (semantic search)
-You need callers/callees of a fn?   → CodeGraph (callers, callees)
-You need to trace a call path?      → CodeGraph (context, impact)
-You need type/interface info?       → CodeGraph (query/node)
-You don't know what you're looking for? → CodeSearch first, then CodeGraph
+
+Returns JSON with file paths, line numbers, and relevance scores. Read the relevant sections yourself.
+
+### Step 2: CodeGraph — trace relationships
+
+Structural queries. Use when you know a symbol name and need its connections.
+
+```bash
+codegraph query "symbol"             # find definition
+codegraph callers "symbol"           # who calls it
+codegraph callees "symbol"           # what it calls
+codegraph impact "symbol"            # what breaks if changed (transitive)
+codegraph context "topic description" # task context
 ```
+
+### Step 3: grep — verify exhaustively
+
+Catch what the tools miss: validation messages, YAML/JSON tags, documentation references, string literals, test fixtures.
+
+```bash
+grep -rn "symbol" --include="*.go" .
+grep -rn "yaml_tag" --include="*.yml" .
+grep -rn "string literal" --include="*.md" .
+```
+
+Don't skip this step. The first two map the territory; this one fills in the details.
+
+---
+
+The rest of this document is reference. Use the 1-2-3 recipe above for every investigation.
 
 ## CodeGraph — structural
 
@@ -85,19 +95,9 @@ codesearch search --group <name> "rate limiting"
 
 The daemon auto-discovers all repos from `~/.codesearch/repos.json`. No `--register` flags. Once started, it keeps running — only restart when you change the config. Never stop the daemon; other agents may be using it.
 
-## Combined workflow (recommended)
-
-The most effective investigations use **both** skill tools and grep, not one or the other:
-
-```
-1. CodeSearch (semantic) →  find files by intent, discover key symbols
-2. CodeGraph (structural) →  trace relationships: callers, callees, impact
-3. grep / read files       →  verify exhaustively, check edge cases, find docs/error messages
-```
-
-Don't stop at the CodeGraph result. Follow up with targeted grep on the files it found to catch everything — validation messages, YAML tags, documentation references, string literals. The skill tools map the territory; grep fills in the details.
-
 ## Examples
+
+Here's how the 1-2-3 recipe plays out for common scenarios:
 
 | Scenario | Approach | Key commands |
 |----------|----------|--------------|
@@ -107,10 +107,9 @@ Don't stop at the CodeGraph result. Follow up with targeted grep on the files it
 | "What would break if I changed `verifyToken`?" | CodeGraph impact + grep | `codegraph impact "verifyToken"` → grep for string literals, YAML, docs mentioning it |
 | "Find something that sends emails" | CodeSearch → CodeGraph → grep | `codesearch search --compact --json --rerank "email sending"` → `codegraph callees` → grep for SMTP config |
 
-## Verify
+## Verify indexes
 
-Check that indexes are healthy before relying on results:
-
+Before relying on results, check health:
 ```bash
 codegraph status .             # Shows node count, file count, "✓ Index is up to date"
 codesearch stats .             # Shows chunk count, Indexed: ✅
