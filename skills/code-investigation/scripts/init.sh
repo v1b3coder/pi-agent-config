@@ -43,7 +43,6 @@ echo "CodeSearch: syncing ($MODEL)..."
 codesearch setup --model "$MODEL" 2>/dev/null
 codesearch index --model "$MODEL" .
 
-# If index wasn't built (e.g. interrupted previous run), force rebuild
 if ! codesearch stats . 2>/dev/null | grep -q "Indexed:.*✅"; then
 	echo "CodeSearch: index not built yet, rebuilding..."
 	codesearch index --force --model "$MODEL" .
