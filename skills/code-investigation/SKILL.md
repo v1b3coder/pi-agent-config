@@ -7,9 +7,11 @@ description: "Find, understand, navigate, or explore any code with CodeSearch & 
 
 Two tools for navigating and understanding code. Use **both** — they complement each other.
 
-## ⚠️  Initialize before use
+## ⚠️  MUST initialize before every session
 
-Run `scripts/init.sh` (resolve relative to this SKILL.md). Idempotent — safe on already-initialized projects. Prints install instructions if tools are missing.
+**Always run `scripts/init.sh` first. Before calling any CodeGraph or CodeSearch command. Every session. No exceptions.**
+
+Resolve the path relative to this SKILL.md. Use a **long timeout (≥1800s)** — model download + indexing can take a while. Idempotent — safe on already-initialized projects. Prints install instructions if tools are missing.
 
 ## Quick reference
 
