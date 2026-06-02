@@ -1,6 +1,6 @@
 ---
 name: code-investigation
-description: "Deep code investigation — a 1-2-3 recipe for thorough code exploration: CodeSearch (find by intent) → CodeGraph (trace relationships) → grep (verify exhaustively). Covers semantic search, symbol lookup, call graphs, type hierarchies, definitions, impact analysis, and cross-language tracing. Always use all three steps — they complement each other regardless of project size. Triggers: the user asks to 'grep', 'find', 'search', 'look up', 'trace', 'navigate', 'where is', 'how does X work', 'what calls X', 'what does X do', 'show me', or wants to explore a codebase."
+description: "Three-step code investigation: CodeSearch (find by intent) → CodeGraph (trace relationships) → grep (verify everything). Covers semantic search, symbol lookup, call graphs, type hierarchies, impact analysis, and cross-language tracing. Always use all three — each catches what the others miss. Triggers when the user asks to 'grep', 'search', 'find', 'look up', 'trace', 'navigate', 'where is', 'how does X work', 'what calls X', 'show me', or wants to explore unfamiliar code."
 ---
 
 # Code Investigation
