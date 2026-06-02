@@ -24,12 +24,23 @@ else
 fi
 
 # --- CodeSearch ---
-if codesearch stats . >/dev/null 2>&1; then
-	echo "CodeSearch: already initialized"
+MODEL="jina-code"
+CURRENT_MODEL=""
+if [ -f .codesearch.db/file_meta.json ]; then
+	CURRENT_MODEL=$(python3 -c "import json; print(json.load(open('.codesearch.db/file_meta.json')).get('model_name',''))" 2>/dev/null || true)
+fi
+
+if [ -n "$CURRENT_MODEL" ] && [ "$CURRENT_MODEL" != "$MODEL" ]; then
+	echo "CodeSearch: switching model $CURRENT_MODEL → $MODEL, reindexing..."
+	rm -rf .codesearch.db
+fi
+
+if [ -d .codesearch.db ] && codesearch stats . >/dev/null 2>&1; then
+	echo "CodeSearch: already initialized ($MODEL)"
 else
-	echo "CodeSearch: setting up jina-code model (code-specific)..."
-	codesearch setup --model jina-code 2>/dev/null
+	echo "CodeSearch: setting up $MODEL model (code-specific)..."
+	codesearch setup --model "$MODEL" 2>/dev/null
 	echo "CodeSearch: indexing..."
-	codesearch index --model jina-code .
+	codesearch index --model "$MODEL" .
 	echo "CodeSearch: done"
 fi
