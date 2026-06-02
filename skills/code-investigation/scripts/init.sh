@@ -27,9 +27,9 @@ fi
 if codesearch stats . >/dev/null 2>&1; then
 	echo "CodeSearch: already initialized"
 else
-	echo "CodeSearch: setting up model..."
-	codesearch setup 2>/dev/null
+	echo "CodeSearch: setting up jina-code model (code-specific)..."
+	codesearch setup --model jina-code 2>/dev/null
 	echo "CodeSearch: indexing..."
-	codesearch index .
+	codesearch index --model jina-code .
 	echo "CodeSearch: done"
 fi

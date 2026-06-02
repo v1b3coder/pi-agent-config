@@ -44,10 +44,10 @@ codegraph files                        # project structure
 
 ## CodeSearch — semantic
 
-Uses a local `.codesearch.db` in the project root. No daemon needed.
+Uses a local `.codesearch.db` in the project root. No daemon needed. Uses tree-sitter AST chunking and `jina-code` embeddings (code-specific model).
 
 ```bash
-codesearch search --compact --json "what the code does"
+codesearch search --compact --json --rerank "what the code does"
 # Returns JSON with file paths and line positions — read relevant sections yourself
 ```
 
