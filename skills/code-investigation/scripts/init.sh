@@ -6,6 +6,8 @@ set -euo pipefail
 PROJECT_DIR="${1:-$(pwd)}"
 cd "$PROJECT_DIR"
 
+did_init=false
+
 if ! command -v codegraph &>/dev/null || ! command -v codesearch &>/dev/null; then
 	echo "=== Missing tools ===" >&2
 	echo "Install them first:" >&2
@@ -20,6 +22,7 @@ if [ -d .codegraph ] && codegraph status . >/dev/null 2>&1; then
 else
 	echo "CodeGraph: initializing..."
 	codegraph init --index .
+	did_init=true
 	echo "CodeGraph: done"
 fi
 
@@ -42,5 +45,16 @@ else
 	codesearch setup --model "$MODEL" 2>/dev/null
 	echo "CodeSearch: indexing..."
 	codesearch index --model "$MODEL" .
+	did_init=true
 	echo "CodeSearch: done"
+fi
+
+# --- .gitignore (only if something was actually initialized) ---
+if [ "$did_init" = true ] && [ -f .gitignore ]; then
+	for entry in .codegraph/ .codesearch.db/; do
+		if ! grep -qFx "$entry" .gitignore 2>/dev/null; then
+			echo "$entry" >> .gitignore
+			echo "Added $entry to .gitignore"
+		fi
+	done
 fi

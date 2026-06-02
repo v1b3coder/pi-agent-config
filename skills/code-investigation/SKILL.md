@@ -11,7 +11,7 @@ Two tools for navigating and understanding code. Use **both** — they complemen
 
 **Always run `scripts/init.sh` first. Before calling any CodeGraph or CodeSearch command. Every session. No exceptions.**
 
-Resolve the path relative to this SKILL.md. Use a **long timeout (≥1800s)** — model download + indexing can take a while. Idempotent — safe on already-initialized projects. Prints install instructions if tools are missing.
+Resolve the path relative to this SKILL.md. Use a **long timeout (≥1800s)** — model download + indexing can take a while. Idempotent — safe on already-initialized projects. Prints install instructions if tools are missing. Also adds `.codegraph/` and `.codesearch.db/` to `.gitignore` when initializing.
 
 ## Quick reference
 
