@@ -305,6 +305,14 @@ def _kill_port(port: int) -> None:
     except FileNotFoundError:
         print("Note: lsof not found, cannot check if port is in use", file=sys.stderr)
 
+
+def _has_display() -> bool:
+    """Check if a display is available for opening a browser."""
+    if sys.platform == "linux":
+        return bool(os.environ.get("DISPLAY")) or bool(os.environ.get("WAYLAND_DISPLAY"))
+    # macOS usually has a display; Windows usually does too
+    return True
+
 class ReviewHandler(BaseHTTPRequestHandler):
     """Serves the review HTML and handles feedback saves.
 
@@ -433,6 +441,19 @@ def main() -> None:
         args.static.parent.mkdir(parents=True, exist_ok=True)
         args.static.write_text(html)
         print(f"\n  Static viewer written to: {args.static}\n")
+        sys.exit(0)
+
+    # In headless environments (most Pi sessions), default to --static
+    if not _has_display():
+        static_path = workspace / "review.html"
+        html = generate_html(runs, skill_name, previous, benchmark)
+        static_path.write_text(html)
+        print(f"\n  No display available. Static viewer written to:")
+        print(f"    {static_path}")
+        print(f"  Open this HTML file in a browser to review results.")
+        print(f"  (The agent-browser skill can also navigate to file://{static_path})")
+        print(f"\n  Feedback: {feedback_path}")
+        print(f"  (agent-browser: use mcp or agent-browser skill for disk-based static review)")
         sys.exit(0)
 
     # Kill any existing process on the target port

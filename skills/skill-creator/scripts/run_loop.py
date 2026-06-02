@@ -4,11 +4,16 @@
 Combines run_eval.py and improve_description.py in a loop, tracking history
 and returning the best description found. Supports train/test split to prevent
 overfitting.
+
+Each iteration is committed to git (if the skill directory is in a repo) so
+previous descriptions can be restored if a newer one performs worse.
 """
 
 import argparse
 import json
+import os
 import random
+import subprocess
 import sys
 import tempfile
 import time
@@ -17,31 +22,90 @@ from pathlib import Path
 
 from scripts.generate_report import generate_html
 from scripts.improve_description import improve_description
-from scripts.run_eval import find_project_root, run_eval
-from scripts.utils import parse_skill_md
+from scripts.run_eval import run_eval
+from scripts.utils import parse_skill_md, update_skill_description
 
 
 def split_eval_set(eval_set: list[dict], holdout: float, seed: int = 42) -> tuple[list[dict], list[dict]]:
     """Split eval set into train and test sets, stratified by should_trigger."""
     random.seed(seed)
 
-    # Separate by should_trigger
     trigger = [e for e in eval_set if e["should_trigger"]]
     no_trigger = [e for e in eval_set if not e["should_trigger"]]
 
-    # Shuffle each group
     random.shuffle(trigger)
     random.shuffle(no_trigger)
 
-    # Calculate split points
     n_trigger_test = max(1, int(len(trigger) * holdout))
     n_no_trigger_test = max(1, int(len(no_trigger) * holdout))
 
-    # Split
     test_set = trigger[:n_trigger_test] + no_trigger[:n_no_trigger_test]
     train_set = trigger[n_trigger_test:] + no_trigger[n_no_trigger_test:]
 
     return train_set, test_set
+
+
+def _is_git_repo(path: Path) -> bool:
+    """Check if path is inside a git repository."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(path), "rev-parse", "--git-dir"],
+            capture_output=True, text=True, timeout=10,
+        )
+        return result.returncode == 0
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return False
+
+
+def _git_commit_skill(skill_path: Path, iteration: int, train_score: str, test_score: str | None) -> None:
+    """Stage and commit the skill directory changes with a structured message.
+
+    Only commits if the skill path is inside a git repository. Works with
+    both standalone skill repos and skills nested inside a larger repo (like
+    ~/.pi/agent/).
+    """
+    try:
+        # Find the git root to ensure we're in a valid repo
+        git_root_result = subprocess.run(
+            ["git", "-C", str(skill_path), "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if git_root_result.returncode != 0:
+            return
+        git_root = Path(git_root_result.stdout.strip())
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return
+
+    # Compute relative path for the skill directory inside the repo
+    try:
+        rel_path = skill_path.resolve().relative_to(git_root.resolve())
+    except ValueError:
+        # Skill is outside the git root — shouldn't happen but handle gracefully
+        return
+
+    score_str = f"train={train_score}"
+    if test_score:
+        score_str += f", test={test_score}"
+
+    commit_msg = (
+        f"feat({rel_path}): iteration {iteration} — description optimization\n"
+        f"\n"
+        f"Trigger stats: {score_str}\n"
+    )
+
+    try:
+        # Stage only the skill directory contents
+        subprocess.run(
+            ["git", "-C", str(git_root), "add", str(rel_path)],
+            capture_output=True, text=True, timeout=10,
+        )
+        # Commit with message
+        subprocess.run(
+            ["git", "-C", str(git_root), "commit", "-m", commit_msg],
+            capture_output=True, text=True, timeout=30,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
 
 
 def run_loop(
@@ -58,11 +122,24 @@ def run_loop(
     verbose: bool,
     live_report_path: Path | None = None,
     log_dir: Path | None = None,
+    enable_git: bool = True,
 ) -> dict:
-    """Run the eval + improvement loop."""
-    project_root = find_project_root()
+    """Run the eval + improvement loop.
+
+    The skill's SKILL.md is edited in place throughout the loop.
+    Each improvement is committed to git (if a repo is available).
+    """
     name, original_description, content = parse_skill_md(skill_path)
     current_description = description_override or original_description
+
+    # Apply override description to SKILL.md in place if provided
+    if description_override:
+        update_skill_description(skill_path, current_description)
+
+    # Check git availability once upfront
+    git_available = enable_git and _is_git_repo(skill_path)
+    if verbose and git_available:
+        print(f"Git versioning enabled for {skill_path}", file=sys.stderr)
 
     # Split into train/test if holdout > 0
     if holdout > 0:
@@ -88,11 +165,9 @@ def run_loop(
         t0 = time.time()
         all_results = run_eval(
             eval_set=all_queries,
-            skill_name=name,
-            description=current_description,
+            skill_path=skill_path,
             num_workers=num_workers,
             timeout=timeout,
-            project_root=project_root,
             runs_per_query=runs_per_query,
             trigger_threshold=trigger_threshold,
             model=model,
@@ -135,6 +210,10 @@ def run_loop(
             "total": train_summary["total"],
             "results": train_results["results"],
         })
+
+        # Build score strings for potential git commit
+        train_score_str = f"{train_summary['passed']}/{train_summary['total']}"
+        test_score_str = f"{test_summary['passed']}/{test_summary['total']}" if test_summary else None
 
         # Write live report if path provided
         if live_report_path:
@@ -191,7 +270,6 @@ def run_loop(
             print(f"\nImproving description...", file=sys.stderr)
 
         t0 = time.time()
-        # Strip test scores from history so improvement model can't see them
         blinded_history = [
             {k: v for k, v in h.items() if not k.startswith("test_")}
             for h in history
@@ -213,6 +291,12 @@ def run_loop(
 
         current_description = new_description
 
+        # ✦ Git commit this iteration before the next eval
+        if git_available:
+            _git_commit_skill(skill_path, iteration, train_score_str, test_score_str)
+            if verbose:
+                print(f"  Committed to git as iteration {iteration}", file=sys.stderr)
+
     # Find the best iteration by TEST score (or train if no test set)
     if test_set:
         best = max(history, key=lambda h: h["test_passed"] or 0)
@@ -224,8 +308,13 @@ def run_loop(
     if verbose:
         print(f"\nExit reason: {exit_reason}", file=sys.stderr)
         print(f"Best score: {best_score} (iteration {best['iteration']})", file=sys.stderr)
+        if git_available:
+            print(f"\nTo see version history:", file=sys.stderr)
+            print(f"  git -C {skill_path} log --oneline", file=sys.stderr)
+            print(f"To restore an earlier version:", file=sys.stderr)
+            print(f"  git -C {skill_path} checkout <commit> -- SKILL.md", file=sys.stderr)
 
-    return {
+    result = {
         "exit_reason": exit_reason,
         "original_description": original_description,
         "best_description": best["description"],
@@ -239,6 +328,12 @@ def run_loop(
         "test_size": len(test_set),
         "history": history,
     }
+
+    if git_available:
+        result["git_versioned"] = True
+        result["git_path"] = str(skill_path)
+
+    return result
 
 
 def main():
@@ -256,6 +351,7 @@ def main():
     parser.add_argument("--verbose", action="store_true", help="Print progress to stderr")
     parser.add_argument("--report", default="auto", help="Generate HTML report at this path (default: 'auto' for temp file, 'none' to disable)")
     parser.add_argument("--results-dir", default=None, help="Save all outputs (results.json, report.html, log.txt) to a timestamped subdirectory here")
+    parser.add_argument("--no-git", action="store_true", help="Disable automatic git commits between iterations")
     args = parser.parse_args()
 
     eval_set = json.loads(Path(args.eval_set).read_text())
@@ -274,13 +370,12 @@ def main():
             live_report_path = Path(tempfile.gettempdir()) / f"skill_description_report_{skill_path.name}_{timestamp}.html"
         else:
             live_report_path = Path(args.report)
-        # Open the report immediately so the user can watch
         live_report_path.write_text("<html><body><h1>Starting optimization loop...</h1><meta http-equiv='refresh' content='5'></body></html>")
-        webbrowser.open(str(live_report_path))
+        if sys.platform != "linux" or os.environ.get("DISPLAY"):
+            webbrowser.open(str(live_report_path))
     else:
         live_report_path = None
 
-    # Determine output directory (create before run_loop so logs can be written)
     if args.results_dir:
         timestamp = time.strftime("%Y-%m-%d_%H%M%S")
         results_dir = Path(args.results_dir) / timestamp
@@ -304,15 +399,14 @@ def main():
         verbose=args.verbose,
         live_report_path=live_report_path,
         log_dir=log_dir,
+        enable_git=not args.no_git,
     )
 
-    # Save JSON output
     json_output = json.dumps(output, indent=2)
     print(json_output)
     if results_dir:
         (results_dir / "results.json").write_text(json_output)
 
-    # Write final HTML report (without auto-refresh)
     if live_report_path:
         live_report_path.write_text(generate_html(output, auto_refresh=False, skill_name=name))
         print(f"\nReport: {live_report_path}", file=sys.stderr)
