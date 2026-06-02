@@ -1,9 +1,9 @@
 ---
-name: code-investigation
-description: "Three-step code investigation: CodeSearch (find by intent) → CodeGraph (trace relationships) → grep (verify everything). Covers semantic search, symbol lookup, call graphs, type hierarchies, impact analysis, and cross-language tracing. Always use all three — each catches what the others miss. Triggers when the user asks to 'grep', 'search', 'find', 'look up', 'trace', 'navigate', 'where is', 'how does X work', 'what calls X', 'show me', or wants to explore unfamiliar code."
+name: code-explorer
+description: "Three-step code exploration: CodeSearch (find by intent) → CodeGraph (trace relationships) → grep (verify everything). Covers semantic search, symbol lookup, call graphs, type hierarchies, impact analysis, and cross-language tracing. Always use all three — each catches what the others miss. Triggers when the user asks to 'grep', 'search', 'find', 'look up', 'trace', 'navigate', 'where is', 'how does X work', 'what calls X', 'show me', or wants to explore unfamiliar code."
 ---
 
-# Code Investigation
+# Code Explorer
 
 Two tools for navigating and understanding code. Use **both** — they complement each other.
 

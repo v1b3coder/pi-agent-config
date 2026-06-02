@@ -5,6 +5,8 @@ set -euo pipefail
 CODESEARCH_PORT=${CODESEARCH_SERVE_PORT:-39725}
 SERVE_PID=""
 
+MODEL="bge-small-q"
+
 find_serve() {
 	SERVE_PID=""
 	local pid
@@ -23,7 +25,7 @@ start)
 		echo "codesearch serve already running (PID $SERVE_PID, port $CODESEARCH_PORT)"
 	else
 		echo "Starting codesearch serve on port $CODESEARCH_PORT..."
-		nohup codesearch serve --no-tui >/dev/null 2>&1 &
+		nohup codesearch serve --model $MODEL --no-tui >/dev/null 2>&1 &
 		disown
 		sleep 2
 		find_serve

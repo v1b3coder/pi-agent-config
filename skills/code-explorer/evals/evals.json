@@ -1,0 +1,71 @@
+{
+  "skill_name": "code-explorer",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Find the `Modules` class in the kinolab.cz project, list all its methods, then find every file that calls `extensions()` or `get()` on a Modules instance.",
+      "expected_output": "Modules class definition with list of methods, plus all call sites for extensions() and get()",
+      "files": [],
+      "expectations": [
+        "Found the Modules class definition in app/site/plugins/modules/lib/modules.php",
+        "Lists at least 4 methods of the Modules class (e.g., __construct, output, modules, module, extensions, get, all, setExtensions)",
+        "Found at least 2 call sites for extensions() or get() calls on Modules instances"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Find all code related to photo gallery in the kinolab.cz project — files, classes, and functions that deal with gallery images. Include image sizing and aspect ratio handling.",
+      "expected_output": "List of gallery-related files, classes, and specific functions for image processing",
+      "files": [],
+      "expectations": [
+        "Found the GalleryField class in app/site/fields/gallery/gallery.php",
+        "Found getImage, getRetinaImage, and calcAspectRatio methods",
+        "Found at least 3 gallery-related files (gallery.php, gallery.css, gallery.js, and/or block gallery files)"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "Find the `Provider` interface in the phonevault project, list all its methods, then find all types that implement it. Show each implementation location.",
+      "expected_output": "Provider interface definition, its methods, and all implementing types with file paths",
+      "files": [],
+      "expectations": [
+        "Found Provider interface in server/internal/config/interface.go",
+        "Lists all interface methods: GetEncoderProfileForPipeline, GetNativeConfigWithDefaults, PipelineIndex",
+        "Found at least the Config struct as an implementing type (server/internal/config/config.go)"
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "Find the `Config` struct in the phonevault Go code, list at least 5 fields, then find which Kotlin files reference config or configuration structures from this project.",
+      "expected_output": "Config struct with field listing, plus Kotlin files referencing configuration concepts",
+      "files": [],
+      "expectations": [
+        "Found Config struct in server/internal/config/config.go",
+        "Lists at least 5 fields (e.g., DefaultPipeline, FallbackPipeline, PhoneSerial, Auth, TLS, Pipelines, Variables, EncoderProfiles)",
+        "Found at least 2 Kotlin files referencing configuration (e.g., SettingsModels.kt, UserPreferences.kt, or WebRtcConfig)"
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "Find where `DeviceAuthenticityConfig` (the type) is defined in the trezor-suite monorepo, show the type definition, and list all packages and files that import it.",
+      "expected_output": "Type definition location, the type itself, and all importing files across the monorepo",
+      "files": [],
+      "expectations": [
+        "Found DeviceAuthenticityConfig type definition in packages/device-authenticity/src/config/deviceAuthenticityConfigTypes.ts",
+        "Shows the type definition content",
+        "Found at least 2 importing files across different packages (e.g., connect/e2e/tests, connect/src/types/api, device-authenticity/src/index)"
+      ]
+    },
+    {
+      "id": 6,
+      "prompt": "Find all blockchain provider implementations in the trezor-suite `packages/blockchain-link/src/workers/` directory. List each worker implementation and trace how they are connected or registered.",
+      "expected_output": "List of worker implementations with file paths, plus the registration/connection mechanism",
+      "files": [],
+      "expectations": [
+        "Found at least 3 worker implementations (blockbook, blockfrost, electrum)",
+        "Shows the file path for each worker implementation",
+        "Identifies the registration mechanism (e.g., baseWorker, index.ts exports, or similar wiring)"
+      ]
+    }
+  ]
+}
