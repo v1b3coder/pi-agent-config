@@ -124,8 +124,10 @@ function loadSettingsEnv(filePath: string): Record<string, string> {
  *
  * Handles:
  *   - `#` line comments
+ *   - Inline comments (`#` after value, respecting quotes)
  *   - `export KEY=VALUE` (strips the export keyword)
  *   - Single- and double-quoted values (quotes stripped, no interpolation)
+ *   - Unquoted values (trimmed, comment-stripped)
  *   - Leading/trailing whitespace trimming
  *   - Empty lines
  *
@@ -152,17 +154,64 @@ function parseDotenv(text: string): Record<string, string> {
     const key = body.slice(0, eqIdx).trim();
     if (!key) continue; // empty key — skip
 
-    let rawValue = body.slice(eqIdx + 1).trim();
+    // Parse the value part after `=`, respecting quotes and inline comments.
+    // Walk character-by-character so we know when we're inside quotes and thus
+    // can distinguish inline `#` (comment) from a `#` inside a quoted string.
+    const rawPart = body.slice(eqIdx + 1);
+    let value = "";
+    let quoteChar: string | null = null;
+    let escaped = false;
 
-    // Strip surrounding quotes
-    if (
-      (rawValue.startsWith('"') && rawValue.endsWith('"')) ||
-      (rawValue.startsWith("'") && rawValue.endsWith("'"))
-    ) {
-      rawValue = rawValue.slice(1, -1);
+    for (let i = 0; i < rawPart.length; i++) {
+      const ch = rawPart[i];
+
+      if (escaped) {
+        value += ch;
+        escaped = false;
+        continue;
+      }
+
+      if (ch === "\\" && quoteChar === '"') {
+        // Backslash-escape only inside double quotes (bash convention)
+        escaped = true;
+        continue;
+      }
+
+      if (ch === "\\" && quoteChar === "'") {
+        // Inside single quotes, backslash is literal
+        value += ch;
+        continue;
+      }
+
+      if (quoteChar) {
+        if (ch === quoteChar) {
+          quoteChar = null; // close quote
+        } else {
+          value += ch;
+        }
+        continue;
+      }
+
+      // Not inside quotes
+      if (ch === "'" || ch === '"') {
+        quoteChar = ch; // open quote
+        continue;
+      }
+
+      if (ch === "#") {
+        // Unquoted `#` starts an inline comment — stop here.
+        break;
+      }
+
+      value += ch;
     }
 
-    result[key] = rawValue;
+    // After parsing, trim whitespace from unquoted values
+    if (!quoteChar) {
+      value = value.trim();
+    }
+
+    result[key] = value;
   }
 
   return result;
