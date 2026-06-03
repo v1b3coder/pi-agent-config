@@ -17,9 +17,9 @@
     {
       "source": "npm:pi-skill-tavily",
       "skills": [
-	"skills/tavily-research/SKILL.md",
+        "skills/tavily-research/SKILL.md",
         "skills/tavily-search/SKILL.md",
-	"skills/tavily-extract/SKILL.md"
+        "skills/tavily-extract/SKILL.md"
       ]
     },
     {
@@ -36,7 +36,8 @@
     "npm:pi-subagents",
     "npm:pi-goal-x",
     "-npm:pi-mcp-adapter",
-    "npm:pi-agentic-compaction"
+    "npm:pi-agentic-compaction",
+    "npm:pi-openplan"
   ],
   "pi-agentic-compaction": {
     "models": [
@@ -44,9 +45,7 @@
     ]
   },
   "env": {
-    "TAVILY_API_KEY": "tvly-dev-REMOVED",
     "PI_EXT_NTFY_ENABLED": 1,
-    "PI_EXT_NTFY_TOPIC": "ntfy-topic-removed",
     "PI_EXT_NTFY_TAGS": "robot",
     "PI_EXT_NTFY_TIMEOUT_MS": 60000
   },
