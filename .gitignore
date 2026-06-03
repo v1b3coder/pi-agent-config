@@ -1,5 +1,6 @@
 .codesearch.db/
 .codegraph/
+.env.local
 bin/
 npm/
 sessions/
