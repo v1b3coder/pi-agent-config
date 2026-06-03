@@ -1,7 +1,9 @@
 .codesearch.db/
 .codegraph/
+.env
 .env.local
 bin/
+node_modules/
 npm/
 sessions/
 litellm-models.json
