@@ -1,47 +1,60 @@
 ---
 name: code-explorer
-description: "Use for understanding, tracing, or exploring unfamiliar code — esp. multi-file flows, dependencies, compound queries (find X + connected things), or architecture. Triggers on: where things live by feature, what calls or imports something, trace chains (who calls X, what X calls), how features flow end-to-end, what breaks if changed, or any code query joining two concerns with 'and'. Also triggers on CodeSearch/CodeGraph mentions (skill manages their setup). Use when user sounds lost, asks about dependencies or cross-file refs, or needs confidence before edits. Not for simple reads, single lookups, debugging, or non-search tasks."
+description: "Understand, trace, or explore unfamiliar code — multi-file flows, dependencies, architecture, compound queries. **Always use** before cross-file edits and when the user asks: where things live, what calls or imports something, trace chains (who calls X, what X calls), how features flow end-to-end, or what breaks if changed. Also triggers on CodeSearch/CodeGraph mentions (skill manages their setup). Use when the user sounds lost, asks about cross-file references, or needs confidence before editing. Not for simple reads, single lookups, debugging, or non-search tasks."
 ---
 
 # Code Explorer
 
-Two tools for navigating and understanding code. Use **both** — they complement each other.
+Three tools for navigating and understanding code. Use them in any order — outputs from one tool feed into the next.
 
-> **First step every session:** Run `scripts/init.sh` to check index health. Use a **long timeout (≥1800s)** — if indexes need creation, setup may take a while.
+> **First step every session:** Run `scripts/init.sh` to check index health.
 > 
 > **If it exits with code 1 or 2:** Tell the user to copy the `!…/setup.sh` command printed by init.sh and paste it into Pi's chat prompt (the `!` prefix runs it as a shell command). Do NOT run any CodeSearch/CodeGraph commands this round.
 > 
 > Once setup.sh completes, re-run init.sh to verify.
 
-## The 1-2-3 Recipe
+## The Three Tools
 
-Always do all three steps, in this order. Each catches things the others miss.
+Three complementary tools. Each has a different entry condition — start with whichever
+matches what you know. Outputs from one tool feed into the next; you'll loop through
+them as understanding grows.
 
-### Step 1: CodeSearch — find by intent
+### CodeSearch — find by intent
 
-Semantic search. Use when you know what the code *does* but not the symbol name.
+Semantic search using embeddings. Use when you know what the code *does* but not
+the symbol name or file path.
 
 ```bash
 codesearch search --compact --json --rerank "what the code does"
 ```
 
-Returns JSON with file paths, line numbers, and relevance scores. Read the relevant sections yourself.
+Returns JSON with file paths, line numbers, and relevance scores. Read the relevant
+sections yourself — be surgical, not exhaustive. Jump to lines around each match
+rather than reading whole files.
 
-### Step 2: CodeGraph — trace relationships
+### CodeGraph — trace relationships
 
-Structural queries. Use when you know a symbol name and need its connections.
+Structural queries. Use when you have a symbol name and need its connections.
 
 ```bash
 codegraph query "symbol"             # find definition
 codegraph callers "symbol"           # who calls it
 codegraph callees "symbol"           # what it calls
 codegraph impact "symbol"            # what breaks if changed (transitive)
-codegraph context "topic description" # task context
+codegraph context "topic description" # task context without a specific symbol
+codegraph files                      # list all indexed files in the project
 ```
 
-### Step 3: grep — verify exhaustively
+**Per-repo only** — no cross-repo search. If the symbol might be in a dependency,
+`cd` to that repo first.
 
-Catch what the tools miss: validation messages, YAML/JSON tags, documentation references, string literals, test fixtures.
+**No symbol yet?** Use `codegraph context` with a topic description — it finds nodes
+near the described concept. Or use codesearch or grep to discover symbols first.
+
+### grep — verify exhaustively
+
+Text search. Use when you have a string literal, config key, error message, or any
+exact pattern.
 
 ```bash
 grep -rn "symbol" --include="*.go" .
@@ -49,84 +62,116 @@ grep -rn "yaml_tag" --include="*.yml" .
 grep -rn "string literal" --include="*.md" .
 ```
 
-Don't skip this step. The first two map the territory; this one fills in the details.
+**Don't skip this step.** The first two surface intent and structure; grep fills in
+the concrete details: test fixtures, config files, documentation references, string
+constants, and anything the semantic tools might have fuzzy-matched around.
 
----
+## The Exploration Cycle
 
-The rest of this document is reference. Use the three-step workflow above for every exploration.
+Exploration loops through the three tools until the territory is clear. At any
+point, your next action depends on what you currently know:
 
-## CodeGraph — structural
+### State machine
 
-Uses a local `.codegraph/` index in the project root. **Per-repo only** — no cross-repo search. If the symbol might be in a dependency, `cd` to that repo first.
+| You have → | Do this | Produces → | Then |
+|---|---|---|---|
+| intent description (what it does, not where) | `CodeSearch` | file paths + line numbers | Read surgically → extract symbols → CodeGraph |
+| symbol name | `CodeGraph` | files + relationships | Read → extract more symbols; or grep for related strings |
+| string/pattern (error msg, config key, test fixture) | `grep` | file paths + matching lines | Read → extract symbols → CodeGraph |
+| read a file, found a symbol | `CodeGraph` | that symbol's connections | Read new files; or grep for related patterns |
+| read a file, found a pattern | `grep` | all occurrences across the project | Read → extract symbols → CodeGraph |
+| CodeGraph returned no new nodes | `grep` the symbol in configs, docs, tests | cross-reference surface | Read; or stop if nothing new |
+| CodeSearch returned nothing useful | refine query, or fall back to `grep` | narrower results | Try grep with key terms from the user's request |
 
-```bash
-codegraph query "authService"          # find symbol
-codegraph callers "authenticateUser"   # who calls it
-codegraph callees "handleRequest"      # what it calls
-codegraph context "auth flow"          # task context
-codegraph impact "verifyToken"         # what breaks if changed
-codegraph files                        # project structure
-```
+### Reading files
 
-## CodeSearch — semantic
+When any tool points at a file: read **surgically** — jump to lines around the
+match, read function bodies, not file headers. Don't read the whole file.
 
-Uses a local `.codesearch.db` in the project root. No daemon needed. Uses tree-sitter AST chunking and `bge-small-q` embeddings (code-specific model).
 
-```bash
-codesearch search --compact --json --rerank "what the code does"
-# Returns JSON with file paths and line positions — read relevant sections yourself
-```
+## Example Traversals
+
+Each row shows a real path through the cycle — not a fixed sequence, but where the
+agent started and how it looped between tools.
+
+| Starting point | Path | Stop when |
+|---|---|---|
+| "Find token refresh logic" | CodeSearch("token refresh") → read hits → CodeGraph callers(found symbol) → grep("refresh\\|expir") in config/yaml → CodeGraph callees → grep test files | From trigger → call chain → config → storage is clear |
+| "What calls authenticateUser?" | CodeGraph callers("authenticateUser") → read callers → grep("authenticate" *.test.go) → CodeGraph callees | All callers + test coverage mapped |
+| "How does handleRequest work end-to-end?" | CodeGraph callees("handleRequest") → read each callee → CodeGraph callees of each → grep error messages | Full call tree + error paths documented |
+| "What would break if I changed verifyToken?" | CodeGraph impact("verifyToken") → read impacted files → grep("verifyToken\\|VerifyToken" --include="*.yml" --include="*.md") | All references in code + config + docs cataloged |
+| "Find something that sends emails" | CodeSearch("email sending") → read hits → CodeGraph callees(found mailer) → grep("smtp\\|mail" *.env *.yml) → CodeGraph callers(mailer) | Trigger → mailer call → SMTP config fully traced |
+
+## When to stop exploring
+
+Stop when all entry points yield no new information. Diminishing returns sets in quickly. Once the map is complete enough to answer the
+original question, move on.
+
+## Presenting findings
+
+Present findings in a format that answers the original question directly.
+Don't dump raw command output — synthesize.
+
+| Question type | Present as |
+|---|---|
+| "What calls X?" / trace chain | **Call chain**: `main() → handleRequest() → authenticateUser() → verifyToken()` |
+| "What would break if I changed X?" | **Impact list**: direct callers first, then transitive callers, then config/docs references — grouped by distance |
+| "Where does X live?" | **File + line**: `src/auth/verifyToken.go:42` — include a one-line summary of the symbol's role |
+| "How does feature X work end-to-end?" | **Narrative flow**: paragraph tracing the path with key files/symbols referenced inline |
+| "Find things related to Y" | **Cross-reference table**: symbol → definition → usages → config/docs references |
+| "Explore this codebase, give me an overview" | **Orientation summary**: 3–5 paragraphs covering entry points, key modules, data flow |
+
+**Principles:**
+
+- **Synthesize, don't dump.** Never show raw JSON, grep output, or command invocations.
+  Explain what you found in your own words.
+- **Anchor every symbol to a file:line.** If you mention a function, say where it lives.
+- **Match the question's shape.** A list question gets a list; a "how does it work"
+  question gets a narrative; an impact question gets a grouped analysis.
+- **End with a one-paragraph summary** that directly answers the original question.
+
+> **Don't show your work.** Never include `codesearch`, `codegraph`, or `grep` commands
+> in your response. The user asked about code, not about how you searched for it.
+
+## Tool Reference
 
 ### Cross-repo search
 
-When the answer may live in a dependency outside project folder, use groups.
+When the answer may live in a dependency outside the project folder, use groups.
 
-**One-time setup** (index + register repos, create group):
+**When you need cross-repo search** — start daemon first:
+
+```bash
+scripts/codesearch-server.sh start     # no-op if already running
+codesearch groups list          # Shows registered groups, setup repo (see below) if not present
+codesearch search --compact --json --rerank --group <name> "rate limiting"
+```
+
+The daemon auto-discovers all repos from `~/.codesearch/repos.json`. No `--register`
+flags. Once started, it keeps running — only restart when you change the config.
+
+**One-time setup for new external repo** (index + register repos, create group):
 
 ```bash
 codesearch index add -a <alias> /path/to/repo
 codesearch groups add <group-name> --aliases <alias> <other-alias>
 ```
 
-This writes to `~/.codesearch/repos.json`. Alias defaults to directory name if `-a` is omitted — groups reference repos by alias.
+This writes to `~/.codesearch/repos.json`. Alias defaults to directory name if
+`-a` is omitted — groups reference repos by alias.
 
-**When you need cross-repo search** — start daemon first:
 
-```bash
-scripts/codesearch-server.sh start     # no-op if already running
-codesearch search --compact --json --rerank --group <name> "rate limiting"
-```
+### Available scripts
 
-The daemon auto-discovers all repos from `~/.codesearch/repos.json`. No `--register` flags. Once started, it keeps running — only restart when you change the config. Never stop the daemon; other agents may be using it.
+These live inside the skill, not the working project — run them resolved relative
+to this SKILL.md:
 
-## Examples
-
-Here's how the 1-2-3 recipe plays out for common scenarios:
-
-| Scenario | Approach | Key commands |
-|----------|----------|--------------|
-| "Find token refresh logic in a monorepo" | CodeSearch → CodeGraph → grep | `codesearch search --compact --json --rerank "token refresh"` → `codegraph callers <symbol>` → grep for error messages |
-| "What calls `authenticateUser`?" | CodeGraph → grep | `codegraph callers "authenticateUser"` → grep test files for the function name |
-| "How does `handleRequest` work end-to-end?" | CodeGraph callees + grep | `codegraph callees "handleRequest"` → read key files → grep for error handling |
-| "What would break if I changed `verifyToken`?" | CodeGraph impact + grep | `codegraph impact "verifyToken"` → grep for string literals, YAML, docs mentioning it |
-| "Find something that sends emails" | CodeSearch → CodeGraph → grep | `codesearch search --compact --json --rerank "email sending"` → `codegraph callees` → grep for SMTP config |
-
-## Verify indexes
-
-Before relying on results, check health:
-```bash
-codegraph status .             # Shows node count, file count, "✓ Index is up to date"
-codesearch stats .             # Shows chunk count, Indexed: ✅
-codesearch groups list         # Shows registered groups (for cross-repo search)
-```
-
-If `codegraph status .` shows errors or "no index found", re-run `scripts/init.sh`.`
-
-## Available scripts
-
-These live inside the skill, not the working project — run them resolved relative to this SKILL.md:
-
-- **`scripts/init.sh`** — Quick health check (fast). Exit code 1 = missing tools, exit code 2 = indexes need setup. Run **every session** before using CodeSearch/CodeGraph.
-- **`scripts/setup.sh`** — One-time index initialization. **Run only on user consent.** Can take an hour+ on large repos. Idempotent — safe to re-run.
-- **`scripts/codesearch-server.sh`** — Start/stop/status for the cross-repo search daemon. `start` (or no arg) launches it; `status` checks; `restart` reloads configuration. 
+- **`scripts/init.sh`** — Quick health check (fast). Exit code 1 = missing tools,
+  exit code 2 = indexes need setup. Run **every session** before using
+  CodeSearch/CodeGraph.
+- **`scripts/setup.sh`** — One-time index initialization. **Run only on user
+  consent.** Can take an hour+ on large repos. Idempotent — safe to re-run.
+- **`scripts/codesearch-server.sh`** — Start/stop/status for the cross-repo search
+  daemon. `start` (or no arg) launches it; `status` checks; `restart` reloads
+  configuration. 
 
