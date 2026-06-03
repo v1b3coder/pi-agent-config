@@ -183,7 +183,8 @@
   "extensionStatusRow": {
     "hiddenKeys": [],
     "knownKeys": [
-      "mcp"
+      "mcp",
+      "plan-mode"
     ]
   }
 }
