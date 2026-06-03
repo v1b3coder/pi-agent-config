@@ -45,7 +45,6 @@
     ]
   },
   "env": {
-    "PI_EXT_NTFY_ENABLED": 1,
     "PI_EXT_NTFY_TAGS": "robot",
     "PI_EXT_NTFY_TIMEOUT_MS": 60000
   },
