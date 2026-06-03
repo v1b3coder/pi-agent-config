@@ -3,6 +3,8 @@
  *
  * Loads before other extensions (sorted first alphabetically), reads:
  *   - ~/.pi/agent/settings.json  "env" block
+ *   - ~/.pi/agent/.env           global dotenv (overrides settings.json)
+ *   - ~/.pi/agent/.env.local     global dotenv local overrides
  *   - .pi/settings.json          "env" block
  *   - $cwd/.env
  *   - $cwd/.env.local
@@ -15,9 +17,11 @@
  *
  *    (lowest)  1.  Actual shell / .profile env vars
  *             2.  ~/.pi/agent/settings.json  "env"   (global Pi settings)
- *             3.  .pi/settings.json          "env"   (per-project Pi settings)
- *             4.  $cwd/.env                          (project defaults)
- *    (highest) 5.  $cwd/.env.local                    (local overrides)
+ *             3.  ~/.pi/agent/.env                   (global dotenv)
+ *             4.  ~/.pi/agent/.env.local             (global dotenv local)
+ *             5.  .pi/settings.json          "env"   (per-project Pi settings)
+ *             6.  $cwd/.env                          (project defaults)
+ *    (highest) 7.  $cwd/.env.local                    (local overrides)
  *
  * Within each source, keys are applied in iteration / line order.
  */
@@ -185,11 +189,15 @@ export default function (_pi: ExtensionAPI): void {
   const sources: Array<{ label: string; vars: Record<string, string> }> = [
     // Tier 2: global Pi settings
     { label: "~/.pi/agent/settings.json", vars: loadSettingsEnv(join(home, ".pi", "agent", "settings.json")) },
-    // Tier 3: per-project Pi settings
+    // Tier 3: global dotenv (overrides settings.json)
+    { label: "~/.pi/agent/.env",          vars: loadDotenvFile(join(home, ".pi", "agent", ".env")) },
+    // Tier 4: global dotenv local overrides
+    { label: "~/.pi/agent/.env.local",    vars: loadDotenvFile(join(home, ".pi", "agent", ".env.local")) },
+    // Tier 5: per-project Pi settings
     { label: ".pi/settings.json",         vars: loadSettingsEnv(join(cwd, ".pi", "settings.json")) },
-    // Tier 4: project defaults
+    // Tier 6: project defaults
     { label: ".env",                      vars: loadDotenvFile(join(cwd, ".env")) },
-    // Tier 5: local overrides (highest)
+    // Tier 7: local overrides (highest)
     { label: ".env.local",                vars: loadDotenvFile(join(cwd, ".env.local")) },
   ];
 
