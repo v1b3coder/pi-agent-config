@@ -29,7 +29,6 @@
 
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { parse as parseDotenv } from "dotenv";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 // ─── Variable expansion ──────────────────────────────────────────────────────
@@ -117,6 +116,57 @@ function loadSettingsEnv(filePath: string): Record<string, string> {
   } catch {
     return {};
   }
+}
+
+// ─── Inline dotenv parse ────────────────────────────────────────────────────
+
+/**
+ * Minimal inline replacement for dotenv.parse().
+ * Parses "KEY=VALUE" lines, strips comments (" # comment"),
+ * handles single/double-quoted values, trims whitespace.
+ * Does NOT expand $VAR references — that is handled separately
+ * in expandVars() during the merge loop.
+ */
+function parseDotenv(src: string): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const rawLine of src.split(/\r?\n/)) {
+    const trimmed = rawLine.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+
+    // Find first unescaped =
+    let eqIndex = -1;
+    for (let i = 0; i < trimmed.length; i++) {
+      if (trimmed[i] === "=" && (i === 0 || trimmed[i - 1] !== "\\")) {
+        eqIndex = i;
+        break;
+      }
+    }
+    if (eqIndex === -1) {
+      result[trimmed] = "";
+      continue;
+    }
+
+    let key = trimmed.slice(0, eqIndex).trim();
+    let value = trimmed.slice(eqIndex + 1).trim();
+
+    // Strip inline comment (space + #) from value — but not inside quotes
+    if (value.startsWith('"') || value.startsWith("'")) {
+      const quote = value[0];
+      const close = value.indexOf(quote, 1);
+      if (close !== -1) {
+        // Keep quoted value including the comment if inside quotes
+        value = value.slice(1, close);
+      }
+    } else {
+      const hash = value.indexOf(" #");
+      if (hash !== -1) value = value.slice(0, hash).trim();
+      const hash2 = value.indexOf("\t#");
+      if (hash2 !== -1) value = value.slice(0, hash2).trim();
+    }
+
+    result[key] = value;
+  }
+  return result;
 }
 
 // ─── .env file loader ───────────────────────────────────────────────────────

@@ -1,9 +1,6 @@
 {
   "name": "_env-injector",
   "private": true,
-  "dependencies": {
-    "dotenv": "^17.4.2"
-  },
   "pi": {
     "extensions": ["./src/index.ts"]
   }
