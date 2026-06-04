@@ -37,7 +37,8 @@
     "npm:pi-goal-x",
     "-npm:pi-mcp-adapter",
     "npm:pi-agentic-compaction",
-    "npm:pi-openplan"
+    "npm:pi-openplan",
+    "npm:pi-interactive-shell"
   ],
   "pi-agentic-compaction": {
     "models": [
