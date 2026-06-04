@@ -47,14 +47,23 @@ Transform tasks into verifiable goals:
 - "Fix the bug" → "Write a test that reproduces it, then make it pass"
 - "Refactor X" → "Ensure tests pass before and after"
 
-For multi-step tasks, state a brief plan:
+For multi-step work, encode the plan via `/plan` tools:
+- `plan_write` — persist phases, verification steps, and `⏸️` checkpoints
+- `plan_question` — batch 2-4 questions when ambiguous (instead of inline back-and-forth)
+- `plan_list` / `plan_read` — review paused plans before resuming
+
+Format:
 ```
-1. [Step] → verify: [check]
-2. [Step] → verify: [check]
-3. [Step] → verify: [check]
+Phase 1: [name]
+- Step → verify: [check]
+
+⏸️ Checkpoint
+
+Phase 2: [name]
+...
 ```
 
-Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
+Strong criteria ("test for invalid inputs passes") let you loop independently. Weak criteria ("make it work") means stop and clarify. Don't plan what wasn't asked. If user gave numbered steps, preserve order.
 
 ## Git
 - When creating new project or tool in `~/projekty`, create public git repository with upstream at 'ssh://git@gitea.slush.cz:220/marekp/$FOLDER.git'.
