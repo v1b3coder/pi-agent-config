@@ -1,6 +1,5 @@
 .codesearch.db/
 .codegraph/
-.env
 .env.local
 bin/
 node_modules/
