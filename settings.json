@@ -38,7 +38,8 @@
     "-npm:pi-mcp-adapter",
     "npm:pi-agentic-compaction",
     "npm:pi-openplan",
-    "npm:pi-interactive-shell"
+    "npm:pi-interactive-shell",
+    "npm:@dreki-gg/pi-context7"
   ],
   "pi-agentic-compaction": {
     "models": [
