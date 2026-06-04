@@ -7,7 +7,7 @@ Personal [Pi](https://github.com/EarendilWorks/pi) agent configuration with:
 - **Web search** — Tavily API for real-time web research
 - **Pi packages**: agentic compaction, amplike (modes, handoff, session query), footer, goals, interactive shell, MCP adapter, OpenPlan, subagents
 - **Custom extensions**: ntfy phone notifications, tool-call revert, context dump, perf speed, web search, visit webpage
-- **Environment injection** — `.env` / `.env.local` loaded via `dotenv` by the `_env-injector` extension
+- **Environment injection** — `.env` / `.env.local` loaded by the `_env-injector` extension
 - **Custom skills**: code-explorer, skill-creator
 - **Git agent rules** — conventional commits, automatic commits, Gitea upstream for `~/projekty`
 
@@ -107,13 +107,11 @@ cd ~/.pi/agent && git pull
 
 `pi update --extensions` handles the npm packages declared in `npm/package.json` automatically. You only need to manually `npm install` in `npm/` on a **fresh clone** (step 4 in Quick start).
 
-> **Extensions** in `extensions/` are **auto-discovered** — both single `.ts` files and subdirectories with `index.ts` (like `_env-injector/`) are loaded automatically. No need to register them anywhere in `settings.json`.
-
-The `_env-injector` extension has its own `package.json` and is **not** managed by `pi update` — update its deps manually from `extensions/_env-injector/`.
+> **Extensions** in `extensions/` are **auto-discovered** — both single `.ts` files and directories with `index.ts` are loaded automatically. No need to register them anywhere in `settings.json`.
 
 ## Environment variable resolution
 
-Pi starts with the current shell environment as a base. The `_env-injector` extension (`extensions/_env-injector/`) layers additional sources on top before any other extension runs, in this priority order (later overrides earlier):
+Pi starts with the current shell environment as a base. The `_env-injector` extension (`extensions/_env-injector.ts`) layers additional sources on top before any other extension runs, in this priority order (later overrides earlier):
 
 | Priority | Source | Description |
 |---|---|---|
@@ -144,7 +142,7 @@ Pi starts with the current shell environment as a base. The `_env-injector` exte
 │   ├── tool-call-revert.ts
 │   ├── context-dump.ts
 │   ├── perf-speed.ts
-│   └── _env-injector/    # Local dotenv extension
+│   └── _env-injector.ts  # Local env injection extension
 ├── skills/               # Custom skills
 │   ├── code-explorer/
 │   └── skill-creator/
