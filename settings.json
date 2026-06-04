@@ -58,5 +58,11 @@
   "hideThinkingBlock": false,
   "collapseChangelog": false,
   "quietStartup": false,
-  "doubleEscapeAction": "tree"
+  "doubleEscapeAction": "tree",
+  "enabledModels": [
+    "litellm/beast/big",
+    "litellm/beast/small",
+    "litellm/Qwen/Qwen3.6-27B-FP8",
+    "litellm/deepseek-ai/DeepSeek-V4-Flash"
+  ]
 }
