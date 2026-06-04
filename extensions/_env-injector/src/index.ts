@@ -9,9 +9,10 @@
  *   - $cwd/.env
  *   - $cwd/.env.local
  *
- * Values from JSON settings undergo shell-like variable expansion so that
- * "$VAR", "${VAR}", and "$$" work as expected.  .env files are parsed via
- * the standard `dotenv` package.
+ * All values (from both settings.json and .env files) undergo shell-like
+ * variable expansion so that "$VAR", "${VAR}", and "$$" work as expected.
+ * Expansion happens during the merge loop, so each tier can reference
+ * variables from any earlier (lower-priority) tier already in process.env.
  *
  * Priority (later in the list overrides earlier — i.e. more specific wins):
  *
@@ -31,7 +32,7 @@ import { join } from "node:path";
 import { parse as parseDotenv } from "dotenv";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-// ─── Variable expansion (settings.json values only) ─────────────────────────
+// ─── Variable expansion ──────────────────────────────────────────────────────
 
 /**
  * Expand $VAR, ${VAR}, and $$ references in a string using the current
@@ -110,7 +111,7 @@ function loadSettingsEnv(filePath: string): Record<string, string> {
     const result: Record<string, string> = {};
     for (const [key, value] of Object.entries(block)) {
       if (value === null || value === undefined) continue;
-      result[key] = expandVars(String(value));
+      result[key] = String(value);
     }
     return result;
   } catch {
@@ -153,20 +154,18 @@ export default function (_pi: ExtensionAPI): void {
     { label: ".env.local",                vars: loadDotenvFile(join(cwd, ".env.local")) },
   ];
 
-  // Start with current process.env as the base
-  const merged: Record<string, string> = {};
-  for (const key of Object.keys(process.env)) {
-    if (process.env[key] !== undefined) merged[key] = process.env[key]!;
-  }
-
+  // Apply sources in priority order.
+  // We write each value to process.env immediately so that later
+  // sources (including later entries in the same .env file) can
+  // expand $VAR references from earlier tiers.  This matches the
+  // intuitive expectation: if ~/.pi/agent/.env defines CAU and
+  // $cwd/.env.local references $CAU, it just works.
+  //
+  // We start by seeding process.env with the current env block so
+  // that the explicit source loop below is the single pass.
   for (const source of sources) {
     for (const [key, value] of Object.entries(source.vars)) {
-      merged[key] = value;
+      process.env[key] = expandVars(value);
     }
-  }
-
-  // Apply everything back — higher tiers freely override lower ones
-  for (const [key, value] of Object.entries(merged)) {
-    process.env[key] = value;
   }
 }
