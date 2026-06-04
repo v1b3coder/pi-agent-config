@@ -154,7 +154,6 @@ function parseDotenv(src: string): Record<string, string> {
       const quote = value[0];
       const close = value.indexOf(quote, 1);
       if (close !== -1) {
-        // Keep quoted value including the comment if inside quotes
         value = value.slice(1, close);
       }
     } else {
@@ -205,14 +204,6 @@ export default function (_pi: ExtensionAPI): void {
   ];
 
   // Apply sources in priority order.
-  // We write each value to process.env immediately so that later
-  // sources (including later entries in the same .env file) can
-  // expand $VAR references from earlier tiers.  This matches the
-  // intuitive expectation: if ~/.pi/agent/.env defines CAU and
-  // $cwd/.env.local references $CAU, it just works.
-  //
-  // We start by seeding process.env with the current env block so
-  // that the explicit source loop below is the single pass.
   for (const source of sources) {
     for (const [key, value] of Object.entries(source.vars)) {
       process.env[key] = expandVars(value);

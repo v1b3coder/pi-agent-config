@@ -1,7 +1,0 @@
-{
-  "name": "_env-injector",
-  "private": true,
-  "pi": {
-    "extensions": ["./src/index.ts"]
-  }
-}
