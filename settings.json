@@ -1,7 +1,7 @@
 {
-  "lastChangelogVersion": "0.78.0",
-  "defaultProvider": "litellm",
-  "defaultModel": "deepseek-ai/DeepSeek-V4-Flash",
+  "lastChangelogVersion": "0.78.1",
+  "defaultProvider": "openrouter",
+  "defaultModel": "auto",
   "compaction": {
     "enabled": true,
     "reserveTokens": 32768,
@@ -34,12 +34,13 @@
     },
     "npm:pi-footer",
     "npm:pi-subagents",
-    "npm:pi-goal-x",
-    "-npm:pi-mcp-adapter",
+    "!npm:pi-goal-x",
+    "!npm:pi-mcp-adapter",
     "npm:pi-agentic-compaction",
     "npm:pi-openplan",
     "npm:pi-interactive-shell",
-    "npm:@dreki-gg/pi-context7"
+    "npm:@dreki-gg/pi-context7",
+    "!npm:pi-hashline-edit"
   ],
   "pi-agentic-compaction": {
     "models": [
@@ -60,10 +61,11 @@
   "collapseChangelog": false,
   "quietStartup": false,
   "doubleEscapeAction": "tree",
-  "enabledModels": [
+  "!enabledModels": [
     "litellm/beast/big",
     "litellm/beast/small",
     "litellm/Qwen/Qwen3.6-27B-FP8",
     "litellm/deepseek-ai/DeepSeek-V4-Flash"
-  ]
+  ],
+  "theme": "dark"
 }

@@ -1,0 +1,24 @@
+{
+  "activePreset": "development",
+  "presets": {
+    "development": {
+      "skills-disabled": [
+        "skill-creator",
+        "create-agentsmd",
+        "design-an-interface",
+        "dispatching-parallel-agents",
+        "find-skills",
+        "grill-with-docs",
+        "impeccable",
+        "prd",
+        "receiving-code-review",
+        "tdd-workflow",
+        "test-driven-development",
+        "web-design-guidelines",
+        "tavily-search",
+        "tavily-extract",
+        "tavily-research"
+      ]
+    }
+  }
+}

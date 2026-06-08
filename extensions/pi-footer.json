@@ -10,12 +10,11 @@
         "enabled": true,
         "options": {
           "raw": false,
-          "hideWhenEmpty": false,
-          "hideWhenZero": false,
-          "bold": false,
-          "cwdDisplayStyle": "default",
+          "icon": "",
           "fg": "blue",
           "bg": "default",
+          "bold": false,
+          "cwdDisplayStyle": "default",
           "segments": 2
         }
       },
@@ -26,19 +25,20 @@
         "options": {
           "raw": false,
           "hideWhenEmpty": false,
-          "hideWhenZero": false,
-          "bold": false,
-          "contextConditionalColors": false,
-          "tokenFormatStyle": "default",
-          "contextBarMode": "default",
+          "icon": "",
+          "text": "",
           "fg": "blue",
           "bg": "default",
+          "bold": false,
+          "tokenFormatStyle": "default",
+          "contextBarMode": "default",
+          "contextConditionalColors": false,
+          "contextWarningPercent": 70,
+          "contextDangerPercent": 90,
           "warningFg": "yellow",
           "warningBg": "default",
           "dangerFg": "red",
-          "dangerBg": "default",
-          "contextWarningPercent": 70,
-          "contextDangerPercent": 90
+          "dangerBg": "default"
         }
       },
       {
@@ -47,11 +47,10 @@
         "enabled": true,
         "options": {
           "raw": true,
-          "hideWhenEmpty": false,
-          "hideWhenZero": false,
-          "bold": false,
+          "icon": "",
           "fg": "yellow",
-          "bg": "default"
+          "bg": "default",
+          "bold": false
         }
       },
       {
@@ -60,12 +59,11 @@
         "enabled": false,
         "options": {
           "raw": false,
-          "hideWhenEmpty": false,
-          "hideWhenZero": false,
-          "bold": false,
-          "tokenFormatStyle": "default",
+          "icon": "",
           "fg": "cyan",
-          "bg": "default"
+          "bg": "default",
+          "bold": false,
+          "tokenFormatStyle": "default"
         }
       },
       {
@@ -75,12 +73,12 @@
         "options": {
           "raw": false,
           "hideWhenEmpty": false,
-          "hideWhenZero": false,
-          "bold": false,
+          "icon": "",
           "text": "-",
-          "widgetId": "perf-speed",
           "fg": "default",
-          "bg": "default"
+          "bg": "default",
+          "bold": false,
+          "widgetId": "perf-speed"
         }
       }
     ],
@@ -91,12 +89,26 @@
         "enabled": true,
         "options": {
           "raw": false,
-          "hideWhenEmpty": false,
-          "hideWhenZero": false,
-          "bold": false,
-          "showProvider": false,
+          "icon": "",
           "fg": "cyan",
-          "bg": "default"
+          "bg": "default",
+          "bold": false,
+          "showProvider": false
+        }
+      },
+      {
+        "id": "event-mq4bg79m-zvgswz",
+        "type": "event",
+        "enabled": true,
+        "options": {
+          "raw": true,
+          "hideWhenEmpty": false,
+          "icon": "",
+          "text": "-",
+          "fg": "default",
+          "bg": "default",
+          "bold": false,
+          "widgetId": "preset"
         }
       },
       {
@@ -105,26 +117,12 @@
         "enabled": true,
         "options": {
           "raw": false,
-          "hideWhenEmpty": false,
-          "hideWhenZero": false,
-          "bold": false,
-          "showSubscription": false,
-          "costFormatStyle": "default",
+          "icon": "",
           "fg": "green",
-          "bg": "default"
-        }
-      },
-      {
-        "id": "session-total-time-mplo9e5y-xo9llw",
-        "type": "session-total-time",
-        "enabled": true,
-        "options": {
-          "raw": false,
-          "hideWhenEmpty": false,
-          "hideWhenZero": false,
+          "bg": "default",
           "bold": false,
-          "fg": "yellow",
-          "bg": "default"
+          "costFormatStyle": "default",
+          "showSubscription": false
         }
       },
       {
@@ -134,10 +132,11 @@
         "options": {
           "raw": false,
           "hideWhenEmpty": false,
-          "hideWhenZero": false,
-          "bold": false,
+          "icon": "",
+          "text": "",
           "fg": "cyan",
-          "bg": "default"
+          "bg": "default",
+          "bold": false
         }
       },
       {
@@ -147,13 +146,14 @@
         "options": {
           "raw": false,
           "hideWhenEmpty": false,
-          "hideWhenZero": false,
-          "bold": false,
-          "surroundLeft": "",
-          "surroundRight": "",
-          "gitBranchDisplayStyle": "default",
+          "icon": "",
+          "text": "",
           "fg": "magenta",
-          "bg": "default"
+          "bg": "default",
+          "bold": false,
+          "gitBranchDisplayStyle": "default",
+          "surroundLeft": "",
+          "surroundRight": ""
         }
       },
       {
@@ -163,10 +163,12 @@
         "options": {
           "raw": false,
           "hideWhenEmpty": false,
-          "hideWhenZero": false,
-          "bold": false,
+          "icon": "",
+          "text": "",
           "fg": "yellow",
-          "bg": "default"
+          "bg": "default",
+          "bold": false,
+          "gitDiffMode": "plain"
         }
       }
     ]
@@ -181,10 +183,17 @@
     "colorLevel": "none"
   },
   "extensionStatusRow": {
-    "hiddenKeys": [],
+    "hiddenKeys": [
+      "preset",
+      "preset-name",
+      "preset-tools"
+    ],
     "knownKeys": [
       "mcp",
-      "plan-mode"
+      "plan-mode",
+      "preset",
+      "preset-name",
+      "preset-tools"
     ]
   }
 }
