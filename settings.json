@@ -1,7 +1,7 @@
 {
-  "lastChangelogVersion": "0.78.1",
-  "defaultProvider": "openrouter",
-  "defaultModel": "auto",
+  "lastChangelogVersion": "0.79.4",
+  "defaultProvider": "litellm",
+  "defaultModel": "deepseek-ai/DeepSeek-V4-Flash",
   "compaction": {
     "enabled": true,
     "reserveTokens": 32768,
@@ -35,7 +35,7 @@
     "npm:pi-footer",
     "npm:pi-subagents",
     "!npm:pi-goal-x",
-    "!npm:pi-mcp-adapter",
+    "npm:pi-mcp-adapter",
     "npm:pi-agentic-compaction",
     "npm:pi-openplan",
     "npm:pi-interactive-shell",
@@ -51,21 +51,22 @@
     "PI_EXT_NTFY_TAGS": "robot",
     "PI_EXT_NTFY_TIMEOUT_MS": 60000
   },
-  "defaultThinkingLevel": "medium",
+  "defaultThinkingLevel": "high",
   "enableInstallTelemetry": false,
   "terminal": {
     "showTerminalProgress": true
   },
   "transport": "auto",
-  "hideThinkingBlock": false,
+  "hideThinkingBlock": true,
   "collapseChangelog": false,
   "quietStartup": false,
   "doubleEscapeAction": "tree",
-  "!enabledModels": [
+  "enabledModels": [
     "litellm/beast/big",
     "litellm/beast/small",
     "litellm/Qwen/Qwen3.6-27B-FP8",
-    "litellm/deepseek-ai/DeepSeek-V4-Flash"
+    "litellm/deepseek-ai/DeepSeek-V4-Flash",
+    "litellm/RazielXYZ/Nex-N2-Pro-NVFP4"
   ],
   "theme": "dark"
 }
