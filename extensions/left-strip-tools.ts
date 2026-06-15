@@ -2,8 +2,9 @@
  * Left-Strip Tool Blocks — replaces full-block colored backgrounds with a
  * thin colored bar on the left edge of each tool call/result line.
  *
- * This re-registers the four main built-in tools (read, bash, edit, write)
- * with renderShell: "self" so the default Box background is bypassed.
+ * This re-registers all seven built-in coding tools
+ * (read, bash, edit, write, grep, find, ls) with renderShell: "self" so the
+ * default Box background is bypassed.
  * Instead of reimplementing content rendering, it wraps the built-in
  * renderCall/renderResult components in LeftStripWrapper, which prefixes
  * every line with a colored strip character. This preserves syntax
@@ -12,9 +13,6 @@
  * For write (which has no built-in renderers), simple custom renderers
  * are used.
  *
- * When pi-hashline-edit is installed, read and edit are left for hashline
- * to handle (hashline provides its own execution + rendering for those).
- *
  * Install: copy to ~/.pi/agent/extensions/left-strip-tools.ts
  * Reload:  /reload
  */
@@ -22,12 +20,14 @@
 import type {
   ExtensionAPI,
   Theme,
-  Component,
-  ToolRenderContext,
 } from "@earendil-works/pi-coding-agent";
+import type { Component } from "@earendil-works/pi-tui";
 import {
   createBashToolDefinition,
   createEditToolDefinition,
+  createFindToolDefinition,
+  createGrepToolDefinition,
+  createLsToolDefinition,
   createReadToolDefinition,
   createWriteToolDefinition,
 } from "@earendil-works/pi-coding-agent";
@@ -38,6 +38,8 @@ import { truncateToWidth } from "@earendil-works/pi-tui";
 // ---------------------------------------------------------------------------
 
 type BgFn = (s: string) => string;
+type RenderResultOptions = { expanded: boolean; isPartial: boolean };
+type RenderContext = { isError: boolean; isPartial: boolean };
 
 /**
  * Renders each line with a colored strip on the leftmost character position.
@@ -132,6 +134,41 @@ function resultBg(isError: boolean, theme: Theme): BgFn {
 }
 
 // ---------------------------------------------------------------------------
+// Collapsed-by-default result rendering
+//
+// By default tool results are hidden behind a one-line summary; the
+// parameters (renderCall) are always shown. Ctrl+O flips the global
+// `expanded` flag, which arrives here as options.expanded, revealing the
+// full output. Errors and in-progress/streaming results are always shown
+// in full — the latter also avoids interfering with the stateful inner
+// renderers (bash/read/edit) that accumulate across partial updates.
+// ---------------------------------------------------------------------------
+
+function countOutputLines(result: {
+  content: Array<{ type: string; text?: string }>;
+}): number {
+  return result.content
+    .filter((c) => c.type === "text" && typeof c.text === "string")
+    .reduce((n, c) => n + c.text!.split("\n").length, 0);
+}
+
+/**
+ * Returns a one-line summary component when the result should be collapsed,
+ * or null to signal the caller to render the full output.
+ */
+function collapsedSummary(
+  result: { content: Array<{ type: string; text?: string }> },
+  options: RenderResultOptions,
+  context: Pick<RenderContext, "isError">,
+  theme: Theme,
+): Component | null {
+  if (options.expanded || options.isPartial || context.isError) return null;
+  const n = countOutputLines(result);
+  const line = theme.fg("dim", `└ ${n} line${n === 1 ? "" : "s"} · ctrl+o to expand`);
+  return new LeftStripBlock([line], () => resultBg(false, theme));
+}
+
+// ---------------------------------------------------------------------------
 // Helpers called by renderCall wrappers for title lines
 // ---------------------------------------------------------------------------
 
@@ -152,7 +189,7 @@ function writeTitle(path: string, content: string, t?: Theme): string {
 function makeWriteCall(
   args: { path: string; content: string },
   theme: Theme,
-  context: ToolRenderContext,
+  context: RenderContext,
 ): Component {
   const titleLine = writeTitle(args.path, args.content, theme);
   return new LeftStripBlock([titleLine], () =>
@@ -183,55 +220,46 @@ function makeWriteResult(
 export default async function (pi: ExtensionAPI) {
   const cwd = process.cwd();
 
-  // Detect pi-hashline-edit — if installed, it owns "read" and "edit" tools
-  let hashlineInstalled = false;
-  try {
-    await import("pi-hashline-edit/src/read.ts");
-    hashlineInstalled = true;
-  } catch {
-    // not installed
-  }
-
   // -- read ----------------------------------------------------------------
   const readDef = createReadToolDefinition(cwd);
-  if (!hashlineInstalled) {
-    pi.registerTool({
-      name: "read",
-      label: "read",
-      description: readDef.description,
-      promptSnippet: readDef.promptSnippet,
-      promptGuidelines: readDef.promptGuidelines,
-      parameters: readDef.parameters,
-      renderShell: "self",
+  pi.registerTool({
+    name: "read",
+    label: "read",
+    description: readDef.description,
+    promptSnippet: readDef.promptSnippet,
+    promptGuidelines: readDef.promptGuidelines,
+    parameters: readDef.parameters,
+    renderShell: "self",
 
-      async execute(toolCallId, params, signal, onUpdate, ctx) {
-        return readDef.execute(toolCallId, params, signal, onUpdate, ctx);
-      },
+    async execute(toolCallId, params, signal, onUpdate, ctx) {
+      return readDef.execute(toolCallId, params, signal, onUpdate, ctx);
+    },
 
-      renderCall(args, theme, context) {
-        const inner = (context.state as any)._lsReadCallInner;
-        const innerCtx = { ...context, lastComponent: inner };
-        const child = readDef.renderCall!(args, theme, innerCtx);
-        (context.state as any)._lsReadCallInner = child;
-        return new LeftStripWrapper(child, () =>
-          pendingOrDoneColor(!context.isPartial, context.isError, theme),
-        );
-      },
+    renderCall(args, theme, context) {
+      const inner = (context.state as any)._lsReadCallInner;
+      const innerCtx = { ...context, lastComponent: inner };
+      const child = readDef.renderCall!(args, theme, innerCtx);
+      (context.state as any)._lsReadCallInner = child;
+      return new LeftStripWrapper(child, () =>
+        pendingOrDoneColor(!context.isPartial, context.isError, theme),
+      );
+    },
 
-      renderResult(result, options, theme, context) {
-        const inner = (context.state as any)._lsReadResultInner;
-        const innerCtx = { ...context, lastComponent: inner };
-        const child = readDef.renderResult!(result, options, theme, innerCtx);
-        (context.state as any)._lsReadResultInner = child;
-        const isPartial = options.isPartial;
-        return new LeftStripWrapper(child, () =>
-          isPartial
-            ? (s: string) => theme.bg("toolPendingBg", s)
-            : resultBg(context.isError, theme),
-        );
-      },
-    });
-  }
+    renderResult(result, options, theme, context) {
+      const collapsed = collapsedSummary(result, options, context, theme);
+      if (collapsed) return collapsed;
+      const inner = (context.state as any)._lsReadResultInner;
+      const innerCtx = { ...context, lastComponent: inner };
+      const child = readDef.renderResult!(result, options, theme, innerCtx);
+      (context.state as any)._lsReadResultInner = child;
+      const isPartial = options.isPartial;
+      return new LeftStripWrapper(child, () =>
+        isPartial
+          ? (s: string) => theme.bg("toolPendingBg", s)
+          : resultBg(context.isError, theme),
+      );
+    },
+  });
 
   // -- bash ----------------------------------------------------------------
   const bashDef = createBashToolDefinition(cwd);
@@ -259,6 +287,8 @@ export default async function (pi: ExtensionAPI) {
     },
 
     renderResult(result, options, theme, context) {
+      const collapsed = collapsedSummary(result, options, context, theme);
+      if (collapsed) return collapsed;
       // Bash's renderResult uses lastComponent as a stateful render component
       // (BashResultRenderComponent). We store the inner one and pass it back.
       const inner = (context.state as any)._lsBashResultInner;
@@ -274,50 +304,171 @@ export default async function (pi: ExtensionAPI) {
     },
   });
 
+  // -- grep ----------------------------------------------------------------
+  const grepDef = createGrepToolDefinition(cwd);
+  pi.registerTool({
+    name: "grep",
+    label: "grep",
+    description: grepDef.description,
+    promptSnippet: grepDef.promptSnippet,
+    promptGuidelines: grepDef.promptGuidelines,
+    parameters: grepDef.parameters,
+    renderShell: "self",
+
+    async execute(toolCallId, params, signal, onUpdate, ctx) {
+      return grepDef.execute(toolCallId, params, signal, onUpdate, ctx);
+    },
+
+    renderCall(args, theme, context) {
+      const inner = (context.state as any)._lsGrepCallInner;
+      const innerCtx = { ...context, lastComponent: inner };
+      const child = grepDef.renderCall!(args, theme, innerCtx);
+      (context.state as any)._lsGrepCallInner = child;
+      return new LeftStripWrapper(child, () =>
+        pendingOrDoneColor(!context.isPartial, context.isError, theme),
+      );
+    },
+
+    renderResult(result, options, theme, context) {
+      const collapsed = collapsedSummary(result, options, context, theme);
+      if (collapsed) return collapsed;
+      const inner = (context.state as any)._lsGrepResultInner;
+      const innerCtx = { ...context, lastComponent: inner };
+      const child = grepDef.renderResult!(result, options, theme, innerCtx);
+      (context.state as any)._lsGrepResultInner = child;
+      return new LeftStripWrapper(child, () =>
+        options.isPartial
+          ? (s: string) => theme.bg("toolPendingBg", s)
+          : resultBg(context.isError, theme),
+      );
+    },
+  });
+
+  // -- find ----------------------------------------------------------------
+  const findDef = createFindToolDefinition(cwd);
+  pi.registerTool({
+    name: "find",
+    label: "find",
+    description: findDef.description,
+    promptSnippet: findDef.promptSnippet,
+    promptGuidelines: findDef.promptGuidelines,
+    parameters: findDef.parameters,
+    renderShell: "self",
+
+    async execute(toolCallId, params, signal, onUpdate, ctx) {
+      return findDef.execute(toolCallId, params, signal, onUpdate, ctx);
+    },
+
+    renderCall(args, theme, context) {
+      const inner = (context.state as any)._lsFindCallInner;
+      const innerCtx = { ...context, lastComponent: inner };
+      const child = findDef.renderCall!(args, theme, innerCtx);
+      (context.state as any)._lsFindCallInner = child;
+      return new LeftStripWrapper(child, () =>
+        pendingOrDoneColor(!context.isPartial, context.isError, theme),
+      );
+    },
+
+    renderResult(result, options, theme, context) {
+      const collapsed = collapsedSummary(result, options, context, theme);
+      if (collapsed) return collapsed;
+      const inner = (context.state as any)._lsFindResultInner;
+      const innerCtx = { ...context, lastComponent: inner };
+      const child = findDef.renderResult!(result, options, theme, innerCtx);
+      (context.state as any)._lsFindResultInner = child;
+      return new LeftStripWrapper(child, () =>
+        options.isPartial
+          ? (s: string) => theme.bg("toolPendingBg", s)
+          : resultBg(context.isError, theme),
+      );
+    },
+  });
+
+  // -- ls ------------------------------------------------------------------
+  const lsDef = createLsToolDefinition(cwd);
+  pi.registerTool({
+    name: "ls",
+    label: "ls",
+    description: lsDef.description,
+    promptSnippet: lsDef.promptSnippet,
+    promptGuidelines: lsDef.promptGuidelines,
+    parameters: lsDef.parameters,
+    renderShell: "self",
+
+    async execute(toolCallId, params, signal, onUpdate, ctx) {
+      return lsDef.execute(toolCallId, params, signal, onUpdate, ctx);
+    },
+
+    renderCall(args, theme, context) {
+      const inner = (context.state as any)._lsLsCallInner;
+      const innerCtx = { ...context, lastComponent: inner };
+      const child = lsDef.renderCall!(args, theme, innerCtx);
+      (context.state as any)._lsLsCallInner = child;
+      return new LeftStripWrapper(child, () =>
+        pendingOrDoneColor(!context.isPartial, context.isError, theme),
+      );
+    },
+
+    renderResult(result, options, theme, context) {
+      const collapsed = collapsedSummary(result, options, context, theme);
+      if (collapsed) return collapsed;
+      const inner = (context.state as any)._lsLsResultInner;
+      const innerCtx = { ...context, lastComponent: inner };
+      const child = lsDef.renderResult!(result, options, theme, innerCtx);
+      (context.state as any)._lsLsResultInner = child;
+      return new LeftStripWrapper(child, () =>
+        options.isPartial
+          ? (s: string) => theme.bg("toolPendingBg", s)
+          : resultBg(context.isError, theme),
+      );
+    },
+  });
+
   // -- edit ----------------------------------------------------------------
   const editDef = createEditToolDefinition(cwd);
-  if (!hashlineInstalled) {
-    pi.registerTool({
-      name: "edit",
-      label: "edit",
-      description: editDef.description,
-      promptSnippet: editDef.promptSnippet,
-      promptGuidelines: editDef.promptGuidelines,
-      parameters: editDef.parameters,
-      renderShell: "self",
+  pi.registerTool({
+    name: "edit",
+    label: "edit",
+    description: editDef.description,
+    promptSnippet: editDef.promptSnippet,
+    promptGuidelines: editDef.promptGuidelines,
+    parameters: editDef.parameters,
+    renderShell: "self",
 
-      async execute(toolCallId, params, signal, onUpdate, ctx) {
-        return editDef.execute(toolCallId, params, signal, onUpdate, ctx);
-      },
+    async execute(toolCallId, params, signal, onUpdate, ctx) {
+      return editDef.execute(toolCallId, params, signal, onUpdate, ctx);
+    },
 
-      renderCall(args, theme, context) {
-        // Edit's renderCall uses context.state.callComponent and lastComponent.
-        // We store the inner call component and pass it as lastComponent.
-        const inner = (context.state as any)._lsEditCallInner;
-        const innerCtx = { ...context, lastComponent: inner };
-        const child = editDef.renderCall!(args, theme, innerCtx);
-        (context.state as any)._lsEditCallInner = child;
-        return new LeftStripWrapper(child, () =>
-          pendingOrDoneColor(!context.isPartial, context.isError, theme),
-        );
-      },
+    renderCall(args, theme, context) {
+      // Edit's renderCall uses context.state.callComponent and lastComponent.
+      // We store the inner call component and pass it as lastComponent.
+      const inner = (context.state as any)._lsEditCallInner;
+      const innerCtx = { ...context, lastComponent: inner };
+      const child = editDef.renderCall!(args, theme, innerCtx);
+      (context.state as any)._lsEditCallInner = child;
+      return new LeftStripWrapper(child, () =>
+        pendingOrDoneColor(!context.isPartial, context.isError, theme),
+      );
+    },
 
-      renderResult(result, options, theme, context) {
-        // Edit's renderResult reuses lastComponent as a Container (clear/addChild).
-        // We pass the inner container and wrap the returned component.
-        const inner = (context.state as any)._lsEditResultInner;
-        const innerCtx = { ...context, lastComponent: inner };
-        const child = editDef.renderResult!(result, options, theme, innerCtx);
-        (context.state as any)._lsEditResultInner = child;
-        const isPartial = options.isPartial;
-        return new LeftStripWrapper(child, () =>
-          isPartial
-            ? (s: string) => theme.bg("toolPendingBg", s)
-            : resultBg(context.isError, theme),
-        );
-      },
-    });
-  }
+    renderResult(result, options, theme, context) {
+      // Edit is never collapsed: its diff is rendered in renderCall, and this
+      // renderResult also reconciles the applied diff back into the call
+      // component, so it must always run.
+      // Edit's renderResult reuses lastComponent as a Container (clear/addChild).
+      // We pass the inner container and wrap the returned component.
+      const inner = (context.state as any)._lsEditResultInner;
+      const innerCtx = { ...context, lastComponent: inner };
+      const child = editDef.renderResult!(result as any, options, theme, innerCtx);
+      (context.state as any)._lsEditResultInner = child;
+      const isPartial = options.isPartial;
+      return new LeftStripWrapper(child, () =>
+        isPartial
+          ? (s: string) => theme.bg("toolPendingBg", s)
+          : resultBg(context.isError, theme),
+      );
+    },
+  });
 
   // -- write ---------------------------------------------------------------
   const writeDef = createWriteToolDefinition(cwd);
