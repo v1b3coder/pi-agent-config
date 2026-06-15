@@ -65,7 +65,7 @@ Phase 2: [name]
 
 Strong criteria ("test for invalid inputs passes") let you loop independently. Weak criteria ("make it work") means stop and clarify. Don't plan what wasn't asked. If user gave numbered steps, preserve order.
 
-## Git
+## Best practices
 - When creating new project or tool in `~/projekty`, create public git repository with upstream at 'ssh://git@gitea.slush.cz:220/marekp/$FOLDER.git'.
 - You MUST mainstain automatic git commits for changes you do. Commit and push frequently with comprehensive messages.
 - If cwd is in a git repo: work there. Do not jump to sibling checkout unless asked.
@@ -80,4 +80,5 @@ Strong criteria ("test for invalid inputs passes") let you loop independently. W
 - If user types a command ("pull and push"), that's consent for that command.
 - No amend unless asked.
 - Unrecognized changes: assume other agent; keep going; focus your changes. If it causes issues, stop + ask user.
+- When developing python, always create/use .venv
 
