@@ -119,11 +119,16 @@ export default function (pi: ExtensionAPI) {
 		const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
 		if (!lastAssistant) return;
 
-		// Extract text content
+		// Extract text content from both "text" and "thinking" blocks
+		// Models may emit malformed tool calls inside a thinking/reasoning block
+		// instead of as proper tool_use API blocks.
 		const textBlocks = lastAssistant.content
 			.filter((c: any) => c.type === "text")
 			.map((c: any) => ("text" in c ? c.text : ""));
-		const allText = textBlocks.join("\n");
+		const thinkingBlocks = lastAssistant.content
+			.filter((c: any) => c.type === "thinking")
+			.map((c: any) => ("thinking" in c ? c.thinking : ""));
+		const allText = [...textBlocks, ...thinkingBlocks].join("\n");
 
 		// Check each grammar
 		let matchedName: string | undefined;
@@ -250,7 +255,13 @@ export default function (pi: ExtensionAPI) {
 // =============================================================================
 
 function extractAssistantText(message: any): string | null {
-	const blocks = message.content?.filter((c: any) => c.type === "text") ?? [];
-	const text = blocks.map((c: any) => ("text" in c ? c.text : "")).join("");
-	return text || null;
+	const textBlocks = message.content?.filter((c: any) => c.type === "text") ?? [];
+	const text = textBlocks.map((c: any) => ("text" in c ? c.text : "")).join("");
+	const thinkingBlocks = message.content?.filter((c: any) => c.type === "thinking") ?? [];
+	const thinking = thinkingBlocks.map((c: any) => ("thinking" in c ? c.thinking : "")).join("");
+	// Join with newline to match the fingerprint format from detection
+	// (which uses join("\n") between text and thinking blocks)
+	const parts = [text, thinking].filter(Boolean);
+	const all = parts.join("\n");
+	return all || null;
 }
