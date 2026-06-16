@@ -58,6 +58,13 @@ const MAX_FINGERPRINTS = 50;
 /** Distinctive customType for the internal retry-trigger message */
 const REVERT_CUSTOM_TYPE = "tool-call-revert";
 
+/**
+ * Distinctive prefix for a retry user message.
+ * Uses null bytes to make accidental collision with real user input impossible.
+ * The context filter identifies and removes messages with this prefix.
+ */
+const RETRY_PREFIX = "\0tool-call-revert-retry\0";
+
 // =============================================================================
 // Extension
 // =============================================================================
@@ -175,19 +182,22 @@ export default function (pi: ExtensionAPI) {
 			"warning",
 		);
 
-		// Trigger retry via pi.sendMessage with a distinctive customType.
-		// The context handler (Step 2) removes this message from the LLM context
-		// by matching its customType — no content text matching needed.
-		// Using sendMessage (not sendUserMessage) gives us a structured
-		// customType property that survives deep cloning.
-		pi.sendMessage(
-			{
-				customType: REVERT_CUSTOM_TYPE,
-				content: "",
-				display: false,
-			},
-			{ deliverAs: "followUp" },
-		);
+		// Trigger retry by injecting a user message via sendUserMessage.
+		// We CANNOT use sendMessage({...}, { deliverAs: "followUp" }) here because
+		// by the time agent_end fires, isStreaming is already false, so the
+		// message just gets silently appended to state without triggering a turn.
+		//
+		// We also CANNOT call sendUserMessage() synchronously here because it
+		// would re-enter agent.prompt() from inside the agent_end subscriber
+		// callback — a re-entrancy hazard.
+		//
+		// Instead we defer with setTimeout(0). By the time it fires, the agent
+		// is fully idle, and sendUserMessage() unconditionally starts a new turn.
+		// The context filter (Step 2) removes both the bad assistant response
+		// and this retry marker before the LLM sees them.
+		setTimeout(() => {
+			pi.sendUserMessage(RETRY_PREFIX);
+		}, 0);
 	});
 
 	// =========================================================================
@@ -203,17 +213,17 @@ export default function (pi: ExtensionAPI) {
 	// =========================================================================
 	// Step 2: Clean the context on EVERY LLM call
 	//
-	// Unlike the previous approach (which only filtered during pendingRetry),
-	// this filter runs unconditionally. This is critical because:
-	//   - The bad assistant response is persisted to the session
-	//   - On subsequent turns (new user prompts), ALL session messages are
-	//     included in context — including the bad response
-	//   - The filter removes any assistant message whose text matches a
-	//     known bad fingerprint, PLUS any custom messages with our
-	//     revert customType
+	// The bad assistant response is persisted to the session. On subsequent
+	// turns (including the retry turn we trigger via sendUserMessage), ALL
+	// session messages are included in context — including the bad response
+	// and our retry marker.
 	//
-	// This ensures the model NEVER sees the bad response or the internal
-	// retry message, not even on future turns.
+	// This filter removes:
+	//   - Any assistant message whose text matches a known bad fingerprint
+	//   - The retry marker user message (identified by RETRY_PREFIX)
+	//
+	// This ensures the model NEVER sees the bad response, not even on
+	// future turns.
 	// =========================================================================
 
 	pi.on("context", async (event) => {
@@ -221,7 +231,8 @@ export default function (pi: ExtensionAPI) {
 		const hasBadFingerprints = badFingerprints.size > 0;
 
 		// Fast path: nothing to filter
-		if (!hasBadFingerprints && !messages.some((m: any) => m.role === "custom" && m.customType === REVERT_CUSTOM_TYPE)) {
+		if (!hasBadFingerprints &&
+			!messages.some((m: any) => m.role === "user" && extractUserText(m)?.startsWith(RETRY_PREFIX))) {
 			return;
 		}
 
@@ -234,10 +245,12 @@ export default function (pi: ExtensionAPI) {
 				}
 			}
 
-			// Remove any custom message from our revert mechanism
-			// Filtered by structured customType — reliable, not fragile content matching
-			if (m.role === "custom" && m.customType === REVERT_CUSTOM_TYPE) {
-				return false;
+			// Remove the retry marker user message (identified by RETRY_PREFIX)
+			if (m.role === "user") {
+				const text = extractUserText(m);
+				if (text && text.startsWith(RETRY_PREFIX)) {
+					return false;
+				}
 			}
 
 			return true;
@@ -264,4 +277,13 @@ function extractAssistantText(message: any): string | null {
 	const parts = [text, thinking].filter(Boolean);
 	const all = parts.join("\n");
 	return all || null;
+}
+
+function extractUserText(message: any): string | null {
+	if (typeof message.content === "string") {
+		return message.content;
+	}
+	const textBlocks = message.content?.filter((c: any) => c.type === "text") ?? [];
+	const text = textBlocks.map((c: any) => ("text" in c ? c.text : "")).join("");
+	return text || null;
 }
