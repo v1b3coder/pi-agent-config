@@ -18,6 +18,51 @@
         "tavily-search",
         "tavily-extract",
         "tavily-research"
+      ],
+      "tools-disabled": [
+        "litellm_skill_list",
+        "litellm_skill_create",
+        "litellm_skill_delete",
+        "session_query",
+        "mcp"
+      ]
+    },
+    "office": {
+      "tools-disabled": [
+        "litellm_skill_list",
+        "litellm_skill_create",
+        "litellm_skill_delete",
+        "handoff",
+        "subagent",
+        "plan_write",
+        "plan_read",
+        "plan_list",
+        "plan_question",
+        "interactive_shell",
+        "context7_resolve_library_id",
+        "context7_get_library_docs",
+        "context7_get_cached_doc_raw"
+      ],
+      "skills-disabled": [
+        "code-explorer",
+        "diagnose",
+        "dispatching-parallel-agents",
+        "executing-plans",
+        "find-skills",
+        "finishing-a-development-branch",
+        "flyio-cli-public",
+        "git-advanced-workflows",
+        "impeccable",
+        "podman",
+        "receiving-code-review",
+        "systematic-debugging",
+        "test-driven-development",
+        "using-git-worktrees",
+        "writing-plans",
+        "tavily-search",
+        "tavily-extract",
+        "pi-subagents",
+        "pi-interactive-shell"
       ]
     }
   }

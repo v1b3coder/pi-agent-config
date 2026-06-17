@@ -1,9 +1,12 @@
 .codesearch.db/
 .codegraph/
 .env.local
+AGENTS.md
+trust.json
 bin/
 node_modules/
 npm/
+mcp-oauth/
 sessions/
 litellm-models.json
 run-history.jsonl
