@@ -66,7 +66,7 @@ Phase 2: [name]
 Strong criteria ("test for invalid inputs passes") let you loop independently. Weak criteria ("make it work") means stop and clarify. Don't plan what wasn't asked. If user gave numbered steps, preserve order.
 
 ## Best practices
-- When creating new project or tool in `~/projekty`, create public git repository with upstream at 'ssh://git@gitea.slush.cz:220/marekp/$FOLDER.git'.
+- When creating new project or tool in `~/projekty`, create public git repository with upstream at 'ssh://git@gitea.slush.cz:220/marekp/$FOLDER.git' by using `tea`.
 - You MUST mainstain automatic git commits for changes you do. Commit and push frequently with comprehensive messages.
 - If cwd is in a git repo: work there. Do not jump to sibling checkout unless asked.
 - No `git worktree` from CLI sessions unless user asks. If dirty/wrong branch/awkward: ask.
