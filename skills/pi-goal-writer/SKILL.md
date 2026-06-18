@@ -1,6 +1,6 @@
 ---
 name: pi-goal-writer
-description: "Drafts and reviews strong /goal objectives for Pi pi-goal and compatible goal-mode agents. Use when the user asks to write, improve, audit, or meta-prompt a long-running agent goal with clear success criteria, verification, constraints, iteration policy, and blocked stop conditions."
+description: "Drafts and reviews strong /goal objectives for Pi goal-mode agent. Use when the user asks to write, improve, audit, or meta-prompt a long-running agent goal with clear success criteria, verification, constraints, iteration policy, and blocked stop conditions."
 ---
 
 # Pi Goal Writer
@@ -9,7 +9,7 @@ description: "Drafts and reviews strong /goal objectives for Pi pi-goal and comp
 
 Write `/goal` prompts that are fit for persistent autonomous work. A goal is not a bigger ordinary prompt; it is a completion contract. The agent will keep using it to decide what to do next and whether it can honestly stop, so the goal must define the desired end state, the evidence that proves it, the constraints that must remain true, and when to stop as blocked instead of drifting.
 
-Use this skill for Pi `pi-goal` first. The same goal-writing principles also apply to Codex Goal mode and compatible `/goal` workflows.
+Use this skill for Pi `pi-goal-audit` first. The same goal-writing principles also apply to Codex Goal mode and compatible `/goal` workflows.
 
 ## Core rule
 
@@ -26,7 +26,7 @@ A strong goal includes six parts:
 
 ## Workflow
 
-1. Default to Pi `pi-goal`. Write a Pi-compatible `/goal` command unless the user explicitly asks for another harness. The goal body can usually be reused in Codex Goal mode; Pi also supports optional token budgets such as `/goal --tokens 50k ...`.
+1. Default to Pi `pi-goal-audit`. Write a Pi-compatible `/goal` command unless the user explicitly asks for another harness. The goal body can usually be reused in Codex Goal mode; Pi also supports optional token budgets such as `/goal --tokens 50k ...`.
 2. Gather context before drafting when the task depends on a repository, issue, test suite, benchmark, PR, design, or external documentation. Read the relevant files or sources instead of inventing the verification surface.
 3. Ask at most three clarifying questions only when missing information changes the goal contract. Prefer making safe assumptions explicit when the user is trying to move quickly.
 4. Draft the goal as a single pasteable command, then include a short rationale or checklist showing how the six parts are covered.
