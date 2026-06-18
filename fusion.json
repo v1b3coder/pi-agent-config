@@ -1,0 +1,12 @@
+{
+  "$comment": "Fusion multi-model deliberation config. Edit panel and judge models below.",
+  "panel": [
+    "litellm/deepseek-ai/DeepSeek-V4-Flash-High",
+    "litellm/Qwen/Qwen3.6-27B-FP8"
+  ],
+  "judge": "litellm/deepseek-ai/DeepSeek-V4-Flash-High",
+  "maxPanelModels": 3,
+  "maxPanelOutputTokens": 32000,
+  "maxCompletionTokens": 32000,
+  "temperature": 0.3
+}
