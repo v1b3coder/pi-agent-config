@@ -4,7 +4,7 @@
   "modes": {
     "rush": {
       "provider": "litellm",
-      "modelId": "beast/big",
+      "modelId": "deepseek-ai/DeepSeek-V4-Flash",
       "thinkingLevel": "off"
     },
     "smart": {

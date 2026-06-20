@@ -48,7 +48,7 @@
     "PI_EXT_NTFY_TAGS": "robot",
     "PI_EXT_NTFY_TIMEOUT_MS": 60000
   },
-  "defaultThinkingLevel": "high",
+  "defaultThinkingLevel": "medium",
   "enableInstallTelemetry": false,
   "terminal": {
     "showTerminalProgress": true
