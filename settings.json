@@ -1,5 +1,5 @@
 {
-  "lastChangelogVersion": "0.79.6",
+  "lastChangelogVersion": "0.79.9",
   "defaultProvider": "litellm",
   "defaultModel": "deepseek-ai/DeepSeek-V4-Flash",
   "compaction": {
@@ -33,7 +33,6 @@
       "skills": []
     },
     "npm:pi-footer",
-    "npm:pi-subagents",
     "npm:pi-mcp-adapter",
     "npm:pi-agentic-compaction",
     "npm:pi-openplan",
@@ -49,13 +48,13 @@
     "PI_EXT_NTFY_TAGS": "robot",
     "PI_EXT_NTFY_TIMEOUT_MS": 60000
   },
-  "defaultThinkingLevel": "medium",
+  "defaultThinkingLevel": "high",
   "enableInstallTelemetry": false,
   "terminal": {
     "showTerminalProgress": true
   },
   "transport": "auto",
-  "hideThinkingBlock": false,
+  "hideThinkingBlock": true,
   "collapseChangelog": false,
   "quietStartup": false,
   "doubleEscapeAction": "tree",
