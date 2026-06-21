@@ -49,6 +49,23 @@ function stripAnsi(s: string): string {
     .replace(/[^\x20-\x7E\n\t]/g, "");             // non-printable
 }
 
+// Strip only layout-breaking sequences, keep SGR color/style codes
+function stripLayoutAnsi(s: string): string {
+  return s
+    // Strip CSI sequences that are NOT SGR (final byte != m / 0x6D)
+    .replace(/\x1B\[[0-9;<=>?]*[ -/]*[\x40-\x6C\x6E-\x7E]/g, "")
+    // Strip OSC sequences (e.g. window title)
+    .replace(/\x1B\].*?(?:\x07|\x1B\\)/g, "")
+    // Strip charset selection
+    .replace(/\x1B\(B/g, "").replace(/\x1B\)B/g, "")
+    // Strip bracketed paste markers
+    .replace(/\x1B\[?2004[hl]/g, "")
+    // Strip CR and BEL
+    .replace(/\r/g, "").replace(/\x07/g, "")
+    // Strip other control chars except TAB, LF, ESC (needed for color codes)
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1A\x1C-\x1F]/g, "");
+}
+
 // ── Runtime formatting ──────────────────────────────────────────────
 
 function formatRuntime(ms: number): string {
@@ -92,7 +109,7 @@ class PtySession {
     this.command = command;
     this.cwd = cwd;
 
-    this.xtermTerminal = new Terminal({ cols, rows, scrollback: 10_000 });
+    this.xtermTerminal = new Terminal({ cols, rows, scrollback: 10_000, allowProposedApi: true });
     this.serializeAddon = new SerializeAddon();
     this.serializeAddon.activate(this.xtermTerminal);
 
@@ -343,7 +360,8 @@ class PtyOverlay {
         const start = Math.max(0, totalLines - VISIBLE_LINES - this.scrollOffset);
         const end = Math.min(totalLines, start + VISIBLE_LINES);
         for (let i = start; i < end; i++) {
-          out.push(this.bordered(truncateToWidth(contentLines[i] ?? "", innerW), innerW));
+          const clean = stripLayoutAnsi(contentLines[i] ?? "");
+          out.push(this.bordered(truncateToWidth(clean, innerW), innerW));
         }
         for (let i = end - start; i < VISIBLE_LINES; i++) {
           out.push(`\u2502${" ".repeat(width - 2)}\u2502`);
