@@ -98,7 +98,7 @@ export default function (pi: ExtensionAPI) {
     if (event.source !== "interactive") return { action: "continue" };
 
     const cleaned = event.text.replace(/[\x00-\x1f]/g, "").trim();
-    if (event.text.startsWith("/") || event.text.startsWith("!") || !cleaned) {
+    if (!cleaned) {
       return { action: "continue" };
     }
 
