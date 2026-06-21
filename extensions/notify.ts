@@ -325,9 +325,9 @@ export default function (pi: ExtensionAPI) {
 		});
 	}
 
-	console.error(
-		`[pi-notify] loaded (sound=${config.soundEnabled}, ntfy=${config.ntfyEnabled ? `✅ topic=${config.ntfyTopic}, timeout=${config.ntfyTimeoutMs}ms` : "❌"})`,
-	);
+	//console.error(
+	//	`[pi-notify] loaded (sound=${config.soundEnabled}, ntfy=${config.ntfyEnabled ? `✅ topic=${config.ntfyTopic}, timeout=${config.ntfyTimeoutMs}ms` : "❌"})`,
+	//);
 
 	let userRespondedSinceEnd = false;
 	let ntfyTimer: ReturnType<typeof setTimeout> | null = null;
