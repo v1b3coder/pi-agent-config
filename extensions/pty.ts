@@ -416,15 +416,45 @@ export default function (pi: ExtensionAPI) {
     name: "pty",
     label: "PTY",
     description:
-      "Run and control persistent interactive CLI sessions (SSH, REPLs, " +
-      "database shells, dev servers). Sessions persist across agent turns " +
-      "— `cd`, `export`, source .venv all carry over.\n\n" +
-      "Usage:\n" +
-      '- Start: pty({ command: "ssh host" })  pty({ command: "python3", cwd: "/x" })\n' +
-      '- Input: pty({ sessionId, input })  pty({ sessionId, input, submit: true })\n' +
-      '- Drain (new output): pty({ sessionId, drain: true })\n' +
-      '- Lines (last N): pty({ sessionId, lines: 50 })\n' +
-      "- List: pty({ list: true })  Kill: pty({ sessionId, kill: true })",
+      "Run and control persistent interactive CLI sessions.\n\n" +
+      "USE WHEN:\n" +
+      "- SSH into a remote host and keep the session alive for multiple commands\n" +
+      "- Python/Node/DB REPL where you type expressions incrementally\n" +
+      "- Database shell (psql, sqlite3, mongosh) across queries\n" +
+      "- Command needs state: cd, export, source .venv, activate env\n" +
+      "- Long-running dev server / watcher / background process\n" +
+      "- Any CLI you'd type into interactively — pty keeps it alive\n\n" +
+      "DO NOT USE FOR:\n" +
+      "- One-shot shell commands — use `bash` tool instead (simpler, cheaper)\n" +
+      "- File operations — use `read`/`write`/`edit`/`ls`/`grep`\n" +
+      "- Installing packages — use `bash` for npm/pip/apt, one command is enough\n\n" +
+      "PERSISTENCE:\n" +
+      "- cd, export, source .venv/bin/activate, env vars all carry over between calls\n" +
+      "- Uses a real PTY (pseudo-terminal) — programs behave as if on a real terminal\n" +
+      "- Sessions last until killed or pi restarts\n" +
+      "- Read output with `drain: true` (new-only, token-efficient) or `lines: N`\n\n" +
+      "USAGE:\n" +
+      '- Start:   pty({ command: "ssh host" })     → {"sessionId":"..."}\n' +
+      '- Input:   pty({ sessionId, input: "ls" })   → sends text\n' +
+      '- Submit:  pty({ sessionId, input: "cmd", submit: true })  → sends + Enter\n' +
+      '- Drain:   pty({ sessionId, drain: true })   → new output since last read\n' +
+      '- Lines:   pty({ sessionId, lines: 20 })     → last N lines (non-destructive)\n' +
+      '- List:    pty({ list: true })               → all active sessions\n' +
+      '- Kill:    pty({ sessionId, kill: true })    → terminate + get final output\n\n" +
+      "NOTE: Always use `submit: true` unless you are typing partial input " +
+      "into a REPL that expects raw keystrokes. Use `drain: true` to poll for " +
+      "new output after sending input — it only returns what's new since last read.",
+    promptSnippet:
+      "pty - persistent interactive CLI (SSH, REPL, db shell). " +
+      "Stateful: cd/export/venv carry over. Use for multi-step interactive sessions. " +
+      "One-shot commands → use bash tool instead.",
+    promptGuidelines: [
+      "- Prefer `pty` over `bash` when you need state to persist (cd, export, source, venv) across commands",
+      "- Prefer `bash` over `pty` for single commands or piped pipelines — bash is cheaper",
+      "- After writing input with `submit: true`, read output with `drain: true` to get new content",
+      "- Kill sessions you no longer need with `kill: true` to free resources",
+      "- Use `list: true` to see all active sessions before starting new ones",
+    ],
 
     parameters: Type.Object({
       command: Type.Optional(Type.String({ description: "Shell command to start a new persistent session" })),
