@@ -159,7 +159,7 @@ export default function (pi: ExtensionAPI) {
       "Single: { task, agent }. Parallel: { tasks: [{agent, task}, ...] }.\n" +
       "Builtin agents: reviewer (code review), scout (codebase recon),\n" +
       "researcher (web research), context-builder (analysis),\n" +
-      "worker (plan implementation), delegate (generic)."
+      "worker (plan implementation), delegate (generic).",
 
     parameters: Type.Object({
       task: Type.Optional(Type.String({
