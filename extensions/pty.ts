@@ -415,7 +415,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "pty_start",
     label: "PTY Start",
-    description: "Spawn a persistent interactive CLI session (SSH, REPL, db shell). Stateful: cd/export/venv carry over. Use over `bash` when state must persist.",
+    description: "Spawn a persistent interactive CLI session (SSH, REPL, db shell, docker, podman). Stateful: cd/export/venv carry over. Use over `bash` when state must persist.",
     promptGuidelines: [
       "- Prefer pty_start over `bash` when state must persist across commands (cd/export/venv). Prefer `bash` over pty_start for one-shot commands (simpler, cheaper).",
     ],
