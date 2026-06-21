@@ -227,6 +227,15 @@ export default function (pi: ExtensionAPI) {
         };
       }
 
+      // ── Check session is running before interaction ──
+      if (session.status !== "running") {
+        return {
+          content: [{ type: "text", text: JSON.stringify({ error: `Session ${params.sessionId} is ${session.status} (exit code: ${session.exitCode ?? "unknown"})` }) }],
+          isError: true,
+          details: {},
+        };
+      }
+
       // ── Send input ──
       if (params.input !== undefined) {
         const text = params.submit ? params.input + "\n" : params.input;

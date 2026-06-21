@@ -15,18 +15,22 @@ const { SerializeAddon } = req("@xterm/addon-serialize");
 
 /** Strip ANSI escape sequences from a string. */
 function stripAnsi(s: string): string {
-  return s.replace(/\x1B\[[0-9;]*[a-zA-Z]/g, "")
-    .replace(/\x1B\][0-9;]*\x07/g, "")
-    .replace(/\x1B\][0-9;]*(\\x1B\\\\)/g, "")
+  return s
+    // CSI sequences: ESC[...m, ESC[...H, etc.
+    .replace(/\x1B\[[0-9;]*[a-zA-Z]/g, "")
+    // OSC sequences: ESC]... BEL or ESC]... ST
+    .replace(/\x1B\].*?(?:\x07|\x1B\\)/g, "")
+    // SGR reset, character set selection, etc.
     .replace(/\x1B\(B/g, "")
-    .replace(/\x1B\[[0-9;]*[Hf]/g, "")
+    .replace(/\x1B\)B/g, "")
+    // Carriage returns
     .replace(/\r/g, "")
-    .replace(/\x1B\[[0-9;]*[h|l]/g, "")
+    // Bracketed paste mode
     .replace(/\x1B\[?2004[hl]/g, "")
-    .replace(/\x1B\]0;[^\x07]*\x07/g, "")
-    .replace(/\x1B\[?[0-9;]*[A-Za-z]/g, "")
+    // BEL
     .replace(/\x07/g, "")
-    .replace(/[^\x20-\x7E\n]/g, "");
+    // Strip remaining non-printable chars except newline and tab
+    .replace(/[^\x20-\x7E\n\t]/g, "");
 }
 
 export interface PtySessionInfo {
