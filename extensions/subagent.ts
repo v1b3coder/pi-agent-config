@@ -25,7 +25,15 @@ interface RunState {
   agentOrder: string[];
 }
 
-let currentRun: RunState | null = null;
+interface RunEntry {
+  runState: RunState;
+  cleanupTimer: ReturnType<typeof setTimeout> | null;
+}
+
+// Stack of active invocations — each parallel subagent call gets its own entry
+const activeRuns: RunEntry[] = [];
+// Ref-counted guard: safe under parallel execution (see spawnChild)
+let subagentChildCount = 0;
 
 // ── Peek overlay component ─────────────────────────────────────────
 
@@ -44,8 +52,8 @@ function stripLayoutAnsi(s: string): string {
     .replace(/\x1B\[[0-9;<=>?]*[ -/]*[\x40-\x6C\x6E-\x7E]/g, "")
     // Strip OSC sequences (e.g. window title)
     .replace(/\x1B\].*?(?:\x07|\x1B\\)/g, "")
-    // Strip charset selection
-    .replace(/\x1B\(B/g, "").replace(/\x1B\)B/g, "")
+    // Strip charset selection (ESC ( B, ESC ) B, ESC ( 0, etc.)
+    .replace(/\x1B[()]./g, "")
     // Strip bracketed paste markers
     .replace(/\x1B\[?2004[hl]/g, "")
     // Strip CR and BEL
@@ -158,8 +166,8 @@ class SubagentPeek {
         `\u2514\u2500\u2500 ${truncatedHelp}${helpFill > 0 ? "\u2500".repeat(helpFill) : ""}\u2518`,
       );
     } else {
-      lines.push(`\u2502${new Array(innerW - 1).join(" ")} \u2502`);
-      lines.push(`\u2514${new Array(width - 1).join("\u2500")}\u2518`);
+      lines.push(this.bordered("No output", innerW));
+      lines.push(`\u2514\u2500\u2500 ${truncateToWidth("Esc close", width - 6)} ${"\u2500".repeat(Math.max(0, width - 6 - visibleWidth("Esc close")))}\u2518`);
     }
 
     return lines;
@@ -204,7 +212,7 @@ const AGENTS: Record<string, AgentDef> = {
       `- Use bash only for non-interactive inspection`,
   },
   researcher: {
-    tools: ["read", "write", "grep", "find"],
+    tools: ["read", "write", "grep", "find", "web_search", "visit_webpage"],
     systemPrompt:
       `You are a research subagent.\n` +
       `Run focused web research on the given topic.\n` +
@@ -272,6 +280,7 @@ async function spawnChild(
   }
   extResult.runtime.pendingProviderRegistrations = [];
 
+  subagentChildCount++;
   process.env[SUBAGENT_CHILD_ENV] = "1";
   try {
     // ═══════════════════════════════════════════════════════════════════
@@ -323,21 +332,34 @@ async function spawnChild(
       session.dispose();
     }
   } finally {
-    delete process.env[SUBAGENT_CHILD_ENV];
+    subagentChildCount--;
+    if (subagentChildCount === 0) {
+      delete process.env[SUBAGENT_CHILD_ENV];
+    }
   }
 }
 
 // ── Extension registration ─────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
-  if (process.env[SUBAGENT_CHILD_ENV] === "1") return;
+  if (process.env[SUBAGENT_CHILD_ENV]) return;
 
   // ── Keyboard shortcut: peek subagent overlay ───────────
   pi.registerShortcut("alt+o", {
     description: "Peek subagent output",
     handler: async (ctx) => {
-      const run = currentRun;
-      if (!run || run.agentStates.size === 0) {
+      // Merge all active runs into one combined overlay view
+      const combinedStates = new Map<string, AgentState>();
+      const combinedOrder: string[] = [];
+      for (let ri = 0; ri < activeRuns.length; ri++) {
+        const entry = activeRuns[ri];
+        if (!entry) continue;
+        for (const [key, state] of entry.runState.agentStates) {
+          combinedStates.set(key, state);
+          combinedOrder.push(key);
+        }
+      }
+      if (combinedStates.size === 0) {
         ctx.ui.notify("No subagent activity to peek", "info");
         return;
       }
@@ -345,8 +367,8 @@ export default function (pi: ExtensionAPI) {
       await ctx.ui.custom<void>(
         (tui, _theme, _kb, done) => {
           const peek = new SubagentPeek(
-            run.agentStates,
-            run.agentOrder,
+            combinedStates,
+            combinedOrder,
             () => {
               clearInterval(pollInterval);
               done(undefined);
@@ -448,7 +470,8 @@ export default function (pi: ExtensionAPI) {
       }
 
       const runState: RunState = { agentStates, agentOrder };
-      currentRun = runState;
+      const entry: RunEntry = { runState, cleanupTimer: null };
+      activeRuns.push(entry);
 
       let lastWidgetUpdate = 0;
       const updateWidget = () => {
@@ -473,31 +496,42 @@ export default function (pi: ExtensionAPI) {
       }
 
       const results = await Promise.all(
-        tasks.map((t) =>
-          spawnChild(t.agent, t.task, ctx.cwd, signal, (delta: string) => {
+        tasks.map(async (t) => {
+          try {
+            return await spawnChild(t.agent, t.task, ctx.cwd, signal, (delta: string) => {
+              const key = `${t.agent}::${t.task}`;
+              const state = agentStates.get(key);
+              if (state) state.output += delta;
+
+              // Throttle widget updates to ~150ms intervals
+              const now = Date.now();
+              if (now - lastWidgetUpdate > 150) {
+                lastWidgetUpdate = now;
+                updateWidget();
+              }
+            });
+          } catch (err) {
             const key = `${t.agent}::${t.task}`;
             const state = agentStates.get(key);
-            if (state) state.output += delta;
-
-            // Throttle widget updates to ~150ms intervals
-            const now = Date.now();
-            if (now - lastWidgetUpdate > 150) {
-              lastWidgetUpdate = now;
-              updateWidget();
-            }
-          })
-        ),
+            if (state) state.status = "error";
+            return `Error: ${err instanceof Error ? err.message : String(err)}`;
+          }
+        }),
       );
 
-      // Mark done, final widget update, then clear
+      // Mark done/error, final widget update, then clear
       for (const t of tasks) {
         const state = agentStates.get(`${t.agent}::${t.task}`);
-        if (state) state.status = "done";
+        if (state && state.status === "running") state.status = "done";
       }
       updateWidget();
-      setTimeout(() => {
-        ctx.ui.setWidget("subagent", undefined);
-        if (currentRun === runState) currentRun = null;
+      entry.cleanupTimer = setTimeout(() => {
+        const idx = activeRuns.indexOf(entry);
+        if (idx !== -1) activeRuns.splice(idx, 1);
+        if (activeRuns.length === 0) {
+          ctx.ui.setWidget("subagent", undefined);
+        }
+        entry.cleanupTimer = null;
       }, 4000);
 
       const summaryLines: string[] = [];
@@ -532,5 +566,15 @@ export default function (pi: ExtensionAPI) {
 
       return new Text(full, 0, 0);
     },
+  });
+
+  // ── Cleanup ──
+  pi.on("session_shutdown", async () => {
+    for (const entry of activeRuns) {
+      if (entry.cleanupTimer) { clearTimeout(entry.cleanupTimer); entry.cleanupTimer = null; }
+    }
+    activeRuns.length = 0;
+    subagentChildCount = 0;
+    delete process.env[SUBAGENT_CHILD_ENV];
   });
 }

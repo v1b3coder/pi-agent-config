@@ -42,11 +42,11 @@ function stripAnsi(s: string): string {
   return s
     .replace(/\x1B\[[0-9;]*[a-zA-Z]/g, "")      // CSI sequences
     .replace(/\x1B\].*?(?:\x07|\x1B\\)/g, "")    // OSC sequences
-    .replace(/\x1B\(B/g, "").replace(/\x1B\)B/g, "")  // charset
+    .replace(/\x1B[()]./g, "")                    // charset (ESC ( B, ESC ) B, ESC ( 0, etc.)
     .replace(/\r/g, "")                             // CR
     .replace(/\x1B\[?2004[hl]/g, "")               // bracketed paste
     .replace(/\x07/g, "")                           // BEL
-    .replace(/[^\x20-\x7E\n\t]/g, "");             // non-printable
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F\x80-\x9F]/g, "");  // control chars only
 }
 
 // Strip only layout-breaking sequences, keep SGR color/style codes
@@ -56,8 +56,8 @@ function stripLayoutAnsi(s: string): string {
     .replace(/\x1B\[[0-9;<=>?]*[ -/]*[\x40-\x6C\x6E-\x7E]/g, "")
     // Strip OSC sequences (e.g. window title)
     .replace(/\x1B\].*?(?:\x07|\x1B\\)/g, "")
-    // Strip charset selection
-    .replace(/\x1B\(B/g, "").replace(/\x1B\)B/g, "")
+    // Strip charset selection (ESC ( B, ESC ) B, ESC ( 0, etc.)
+    .replace(/\x1B[()]./g, "")
     // Strip bracketed paste markers
     .replace(/\x1B\[?2004[hl]/g, "")
     // Strip CR and BEL
@@ -102,7 +102,6 @@ class PtySession {
 
   private lineBuffer: string[] = [];
   private partialLine = "";
-  private rawOutput = "";
 
   constructor(id: string, command: string, cwd: string, cols = 80, rows = 24) {
     this.id = id;
@@ -121,7 +120,6 @@ class PtySession {
 
     this.pty._readable.on("data", (data: Buffer) => {
       const text = data.toString("utf-8");
-      this.rawOutput += text;
       this.xtermTerminal.write(text);
 
       const clean = stripAnsi(text);
@@ -338,9 +336,10 @@ class PtyOverlay {
       return i === this.selectedIndex ? `\x1b[7m${label}\x1b[27m` : label;
     });
     const tabsStr = tabParts.join("\u2502");
-    const tabsVis = visibleWidth(tabsStr);
+    const truncatedTabs = truncateToWidth(tabsStr, width - 6);
+    const tabsVis = visibleWidth(truncatedTabs);
     const fill = Math.max(0, width - 6 - tabsVis);
-    out.push(`\u250c\u2500\u2500 ${truncateToWidth(tabsStr, width - 6)} ${"\u2500".repeat(fill)}\u2510`);
+    out.push(`\u250c\u2500\u2500 ${truncatedTabs} ${"\u2500".repeat(fill)}\u2510`);
 
     // ── Info bar ──
     const sel = sessions[this.selectedIndex];
