@@ -1,5 +1,6 @@
 .codesearch.db/
 .codegraph/
+.pi/
 .env.local
 AGENTS.md
 trust.json
@@ -12,3 +13,6 @@ litellm-models.json
 run-history.jsonl
 mcp-cache.json
 pi-crash.log
+prompt-history.json
+package.json
+package-lock.json
