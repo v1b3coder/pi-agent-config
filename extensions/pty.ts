@@ -416,6 +416,9 @@ export default function (pi: ExtensionAPI) {
     name: "pty_start",
     label: "PTY Start",
     description: "Spawn a persistent interactive CLI session (SSH, REPL, db shell). Stateful: cd/export/venv carry over. Use over `bash` when state must persist.",
+    promptGuidelines: [
+      "- Prefer pty_start over `bash` when state must persist across commands (cd/export/venv). Prefer `bash` over pty_start for one-shot commands (simpler, cheaper).",
+    ],
     parameters: Type.Object({
       command: Type.String({ description: "Shell command to start (e.g. ssh host, python3, psql -U user db)" }),
       cwd: Type.Optional(Type.String({ description: "Working directory for the new session" })),
