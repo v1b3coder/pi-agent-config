@@ -4,7 +4,7 @@
  * A single-file extension for running and controlling persistent interactive
  * CLI sessions (SSH, REPLs, database shells, dev servers) across agent turns.
  *
- * Tool: pty({ command | sessionId + (input|drain|lines|kill) | list })
+ * Tools: pty_start / pty_send / pty_drain / pty_tail / pty_list / pty_kill
  * Shortcut: Alt+T — toggle PTY session overlay
  * Widget: Shows active sessions below the editor
  *
@@ -411,129 +411,137 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  // ── Tool ──
+  // ── Tools ──
   pi.registerTool({
-    name: "pty",
-    label: "PTY",
+    name: "pty_start",
+    label: "PTY Start",
     description:
-      "Run and control persistent interactive CLI sessions.\n\n" +
-      "USE WHEN:\n" +
-      "- SSH into a remote host and keep the session alive for multiple commands\n" +
-      "- Python/Node/DB REPL where you type expressions incrementally\n" +
-      "- Database shell (psql, sqlite3, mongosh) across queries\n" +
-      "- Command needs state: cd, export, source .venv, activate env\n" +
-      "- Long-running dev server / watcher / background process\n" +
-      "- Any CLI you'd type into interactively — pty keeps it alive\n\n" +
-      "DO NOT USE FOR:\n" +
-      "- One-shot shell commands — use `bash` tool instead (simpler, cheaper)\n" +
-      "- File operations — use `read`/`write`/`edit`/`ls`/`grep`\n" +
-      "- Installing packages — use `bash` for npm/pip/apt, one command is enough\n\n" +
-      "PERSISTENCE:\n" +
-      "- cd, export, source .venv/bin/activate, env vars all carry over between calls\n" +
-      "- Uses a real PTY (pseudo-terminal) — programs behave as if on a real terminal\n" +
-      "- Sessions last until killed or pi restarts\n" +
-      "- Read output with `drain: true` (new-only, token-efficient) or `lines: N`\n\n" +
-      "USAGE:\n" +
-      '- Start:   pty({ command: "ssh host" })     → {"sessionId":"..."}\n' +
-      '- Input:   pty({ sessionId, input: "ls" })   → sends text\n' +
-      '- Submit:  pty({ sessionId, input: "cmd", submit: true })  → sends + Enter\n' +
-      '- Drain:   pty({ sessionId, drain: true })   → new output since last read\n' +
-      '- Lines:   pty({ sessionId, lines: 20 })     → last N lines (non-destructive)\n' +
-      '- List:    pty({ list: true })               → all active sessions\n' +
-      '- Kill:    pty({ sessionId, kill: true })    → terminate + get final output\n\n" +
-      "NOTE: Always use `submit: true` unless you are typing partial input " +
-      "into a REPL that expects raw keystrokes. Use `drain: true` to poll for " +
-      "new output after sending input — it only returns what's new since last read.",
-    promptSnippet:
-      "pty - persistent interactive CLI (SSH, REPL, db shell). " +
-      "Stateful: cd/export/venv carry over. Use for multi-step interactive sessions. " +
-      "One-shot commands → use bash tool instead.",
+      "Start a new persistent interactive CLI session (SSH, REPL, db shell, dev server).\n" +
+      "The session runs in a real PTY — cd, export, source .venv all carry over.\n" +
+      "Use pty_send to type commands, pty_drain / pty_tail to read output.\n\n" +
+      "Use this over `bash` when you need STATE to persist across commands.\n" +
+      "For one-shot commands, use `bash` instead (simpler, cheaper).",
+    promptSnippet: "pty_start - spawn a persistent interactive CLI session (SSH, REPL, db shell)",
     promptGuidelines: [
-      "- Prefer `pty` over `bash` when you need state to persist (cd, export, source, venv) across commands",
-      "- Prefer `bash` over `pty` for single commands or piped pipelines — bash is cheaper",
-      "- After writing input with `submit: true`, read output with `drain: true` to get new content",
-      "- Kill sessions you no longer need with `kill: true` to free resources",
-      "- Use `list: true` to see all active sessions before starting new ones",
+      "- Prefer pty_start + pty_send over `bash` when state must persist (cd, export, source, venv)",
+      "- Prefer `bash` over pty_start for single commands or piped pipelines",
+      "- After pty_send, read output with pty_drain (new-only) or pty_tail (last N lines)",
+      "- Always kill sessions with pty_kill when done to free resources",
     ],
-
     parameters: Type.Object({
-      command: Type.Optional(Type.String({ description: "Shell command to start a new persistent session" })),
-      sessionId: Type.Optional(Type.String({ description: "Session to interact with" })),
-      input: Type.Optional(Type.String({ description: "Text to send to the session" })),
-      submit: Type.Optional(Type.Boolean({ description: "Append \\n (Enter) after input", default: false })),
-      drain: Type.Optional(Type.Boolean({ description: "Return only new output since last drain call" })),
-      lines: Type.Optional(Type.Integer({ description: "Lines of output to return (1–200)" })),
-      kill: Type.Optional(Type.Boolean({ description: "Terminate a running session" })),
-      list: Type.Optional(Type.Boolean({ description: "List all sessions" })),
-      cwd: Type.Optional(Type.String({ description: "Working directory for new sessions" })),
+      command: Type.String({ description: "Shell command to start (e.g. \"ssh host\", \"python3\", \"psql -U user db\")" }),
+      cwd: Type.Optional(Type.String({ description: "Working directory for the new session" })),
     }),
-
     async execute(_id, params, _signal, onUpdate, ctx) {
       if (!manager) return { content: [{ type: "text", text: "PTY manager not initialized" }], isError: true, details: {} };
+      const cwd = params.cwd ?? ctx.cwd;
+      const { id } = manager.create(params.command, cwd, 80, 24);
+      onUpdate?.({ content: [{ type: "text", text: `→ started PTY session: ${id}` }], details: {} });
+      updateWidget(ctx);
+      return { content: [{ type: "text", text: JSON.stringify({ sessionId: id, status: "running", command: params.command }) }], isError: false, details: { sessionId: id } };
+    },
+  });
 
-      // List
-      if (params.list) {
-        const sessions = manager.list();
-        const text = sessions.length === 0 ? "No active PTY sessions"
-          : sessions.map((s) => `${s.status === "running" ? "\u25c9" : s.status === "exited" ? "\u2713" : "\u2717"} ${s.id}  ${s.status}  ${formatRuntime(s.runtime)}  ${s.command}`).join("\n");
-        return { content: [{ type: "text", text }], isError: false, details: { sessions: sessions.map((s) => s.id) } };
-      }
-
-      // Start
-      if (params.command) {
-        const cwd = params.cwd ?? ctx.cwd;
-        const { id } = manager.create(params.command, cwd, 80, 24);
-        onUpdate?.({ content: [{ type: "text", text: `→ started PTY session: ${id}` }], details: {} });
-        updateWidget(ctx);
-        return { content: [{ type: "text", text: JSON.stringify({ sessionId: id, status: "running", command: params.command }) }], isError: false, details: { sessionId: id } };
-      }
-
-      if (!params.sessionId) {
-        return { content: [{ type: "text", text: "Provide command, or sessionId + action, or list: true" }], isError: true, details: {} };
-      }
-
+  pi.registerTool({
+    name: "pty_send",
+    label: "PTY Send",
+    description:
+      "Send text input to a running PTY session.\n" +
+      "By default text is sent as-is (no trailing newline).\n" +
+      "Use submit: true to append Enter (for shell commands, full REPL expressions).\n" +
+      "After sending, call pty_drain({ sessionId }) to read the new output.",
+    parameters: Type.Object({
+      sessionId: Type.String({ description: "Session ID from pty_start" }),
+      input: Type.String({ description: "Text to send to the session" }),
+      submit: Type.Optional(Type.Boolean({ description: "Append \\n (Enter) after input", default: false })),
+    }),
+    async execute(_id, params, _signal, onUpdate, ctx) {
+      if (!manager) return { content: [{ type: "text", text: "PTY manager not initialized" }], isError: true, details: {} };
       const session = manager.get(params.sessionId);
+      if (!session) return { content: [{ type: "text", text: `Session ${params.sessionId} not found` }], isError: true, details: {} };
+      if (session.status !== "running") return { content: [{ type: "text", text: `Session ${params.sessionId} is ${session.status}` }], isError: true, details: {} };
+      const text = params.submit ? params.input + "\n" : params.input;
+      session.write(text);
+      onUpdate?.({ content: [{ type: "text", text: `→ wrote to ${params.sessionId}` }], details: {} });
+      updateWidget(ctx);
+      const r: Record<string, any> = { sessionId: params.sessionId, input: params.input };
+      if (params.submit) r.submitted = true;
+      return { content: [{ type: "text", text: JSON.stringify(r) }], isError: false, details: {} };
+    },
+  });
 
-      // Kill
-      if (params.kill) {
-        const killed = manager.kill(params.sessionId);
-        if (!killed) return { content: [{ type: "text", text: `Session ${params.sessionId} not found` }], isError: true, details: {} };
-        updateWidget(ctx);
-        return { content: [{ type: "text", text: JSON.stringify({ sessionId: params.sessionId, status: "killed", output: killed.readTail(30), exitCode: killed.exitCode }) }], isError: false, details: {} };
-      }
+  pi.registerTool({
+    name: "pty_drain",
+    label: "PTY Drain",
+    description:
+      "Read new output from a PTY session since the last drain read.\n" +
+      "This is the token-efficient way to poll — it only returns what's NEW.\n" +
+      "Returns empty string if nothing new has been produced.\n" +
+      "does not advance the drain cursor — use pty_tail to look back without consuming.",
+    parameters: Type.Object({
+      sessionId: Type.String({ description: "Session ID from pty_start" }),
+    }),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      if (!manager) return { content: [{ type: "text", text: "PTY manager not initialized" }], isError: true, details: {} };
+      const session = manager.get(params.sessionId);
+      if (!session) return { content: [{ type: "text", text: `Session ${params.sessionId} not found` }], isError: true, details: {} };
+      const result = manager.readDrain(params.sessionId);
+      return { content: [{ type: "text", text: JSON.stringify({ sessionId: params.sessionId, output: result?.text ?? "", hasMore: result?.more ?? false, runtime: formatRuntime(session.runtime) }) }], isError: false, details: {} };
+    },
+  });
 
-      if (!session) {
-        return { content: [{ type: "text", text: `Session ${params.sessionId} not found or no longer running` }], isError: true, details: {} };
-      }
+  pi.registerTool({
+    name: "pty_tail",
+    label: "PTY Tail",
+    description:
+      "Read the last N lines of output from a PTY session (non-destructive).\n" +
+      "Does not advance the drain cursor — safe to use for ad-hoc context review.\n" +
+      "Max 200 lines.",
+    parameters: Type.Object({
+      sessionId: Type.String({ description: "Session ID from pty_start" }),
+      lines: Type.Optional(Type.Integer({ description: "Number of lines to return (1–200)", default: 30 })),
+    }),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      if (!manager) return { content: [{ type: "text", text: "PTY manager not initialized" }], isError: true, details: {} };
+      const session = manager.get(params.sessionId);
+      if (!session) return { content: [{ type: "text", text: `Session ${params.sessionId} not found` }], isError: true, details: {} };
+      const text = manager.readTail(params.sessionId, params.lines) ?? "";
+      return { content: [{ type: "text", text: JSON.stringify({ sessionId: params.sessionId, output: text, status: session.status, runtime: formatRuntime(session.runtime) }) }], isError: false, details: {} };
+    },
+  });
 
-      if (session.status !== "running") {
-        return { content: [{ type: "text", text: JSON.stringify({ error: `Session ${params.sessionId} is ${session.status} (exit code: ${session.exitCode ?? "unknown"})` }) }], isError: true, details: {} };
-      }
+  pi.registerTool({
+    name: "pty_list",
+    label: "PTY List",
+    description: "List all active PTY sessions with status, runtime, and command.",
+    promptSnippet: "pty_list - show all active PTY sessions",
+    parameters: Type.Object({}),
+    async execute(_id, _params, _signal, _onUpdate, ctx) {
+      if (!manager) return { content: [{ type: "text", text: "PTY manager not initialized" }], isError: true, details: {} };
+      const sessions = manager.list();
+      const text = sessions.length === 0 ? "No active PTY sessions"
+        : sessions.map((s) => `${s.status === "running" ? "\u25c9" : s.status === "exited" ? "\u2713" : "\u2717"} ${s.id}  ${s.status}  ${formatRuntime(s.runtime)}  ${s.command}`).join("\n");
+      return { content: [{ type: "text", text }], isError: false, details: { sessions: sessions.map((s) => s.id) } };
+    },
+  });
 
-      // Input
-      if (params.input !== undefined) {
-        const text = params.submit ? params.input + "\n" : params.input;
-        session.write(text);
-        onUpdate?.({ content: [{ type: "text", text: `→ wrote to ${params.sessionId}` }], details: {} });
-        updateWidget(ctx);
-        const response: Record<string, any> = { sessionId: params.sessionId, input: params.input };
-        if (params.submit) response.submitted = true;
-        return { content: [{ type: "text", text: JSON.stringify(response) }], isError: false, details: {} };
-      }
-
-      // Drain
-      if (params.drain) {
-        const result = manager.readDrain(params.sessionId);
-        return { content: [{ type: "text", text: JSON.stringify({ sessionId: params.sessionId, output: result?.text ?? "", hasMore: result?.more ?? false, runtime: formatRuntime(session.runtime) }) }], isError: false, details: {} };
-      }
-
-      // Lines
-      if (params.lines !== undefined) {
-        return { content: [{ type: "text", text: JSON.stringify({ sessionId: params.sessionId, output: manager.readTail(params.sessionId, params.lines) ?? "", status: session.status, runtime: formatRuntime(session.runtime) }) }], isError: false, details: {} };
-      }
-
-      // Default
-      return { content: [{ type: "text", text: JSON.stringify({ sessionId: params.sessionId, status: session.status, runtime: formatRuntime(session.runtime) }) }], isError: false, details: {} };
+  pi.registerTool({
+    name: "pty_kill",
+    label: "PTY Kill",
+    description:
+      "Terminate a PTY session and return its final output.\n" +
+      "Safe to call on already-dead sessions (returns final output and unregisters).\n" +
+      "Always kill sessions you no longer need to free resources.",
+    promptSnippet: "pty_kill - terminate a PTY session and return final output",
+    parameters: Type.Object({
+      sessionId: Type.String({ description: "Session ID from pty_start" }),
+    }),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      if (!manager) return { content: [{ type: "text", text: "PTY manager not initialized" }], isError: true, details: {} };
+      const killed = manager.kill(params.sessionId);
+      if (!killed) return { content: [{ type: "text", text: `Session ${params.sessionId} not found` }], isError: true, details: {} };
+      updateWidget(ctx);
+      return { content: [{ type: "text", text: JSON.stringify({ sessionId: params.sessionId, status: "killed", output: killed.readTail(30), exitCode: killed.exitCode }) }], isError: false, details: {} };
     },
   });
 
