@@ -49,6 +49,22 @@ function stripAnsi(s: string): string {
     .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F\x80-\x9F]/g, "");  // control chars only
 }
 
+// Interpret escape sequences in raw input: \n→newline, \t→tab, \x1b→byte 0x1b, etc.
+// Use \\ for a literal backslash, \\n for literal \n text.
+function interpretEscapes(s: string): string {
+  return s.replace(/\\(\\|n|r|t|e|0|x[0-9a-fA-F]{2}|u[0-9a-fA-F]{4})/g, (_, seq) => {
+    if (seq === '\\') return '\\';
+    if (seq === 'n') return '\n';
+    if (seq === 'r') return '\r';
+    if (seq === 't') return '\t';
+    if (seq === 'e') return '\x1b';
+    if (seq === '0') return '\0';
+    if (seq.startsWith('x')) return String.fromCharCode(parseInt(seq.slice(1), 16));
+    if (seq.startsWith('u')) return String.fromCharCode(parseInt(seq.slice(1), 16));
+    return _;
+  });
+}
+
 // Strip only layout-breaking sequences, keep SGR color/style codes
 function stripLayoutAnsi(s: string): string {
   return s
@@ -453,7 +469,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "pty_send",
     label: "PTY Send",
-    description: "Send text to a running PTY session. submit:true appends \\n (Enter). Then use pty_drain to read response.",
+    description: "Send text to a running PTY session. submit:true appends \\n (Enter). Then use pty_drain to read response.\nInput is raw: escape sequences are interpreted. Use \\n for newline, \\t for tab, \\x1b for Escape byte, \\e for Escape. Use \\\\ for a literal backslash, \\\\n for literal \\n text.",
     parameters: Type.Object({
       sessionId: Type.String({ description: "Session ID from pty_start" }),
       input: Type.String({ description: "Text to send to the session" }),
@@ -464,7 +480,7 @@ export default function (pi: ExtensionAPI) {
       const session = manager.get(params.sessionId);
       if (!session) return { content: [{ type: "text", text: `Session ${params.sessionId} not found` }], isError: true, details: {} };
       if (session.status !== "running") return { content: [{ type: "text", text: `Session ${params.sessionId} is ${session.status}` }], isError: true, details: {} };
-      const text = params.submit ? params.input + "\n" : params.input;
+      const text = interpretEscapes(params.submit ? params.input + "\n" : params.input);
       session.write(text);
       onUpdate?.({ content: [{ type: "text", text: `→ wrote to ${params.sessionId}` }], details: {} });
       updateWidget(ctx);
