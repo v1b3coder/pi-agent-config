@@ -37,6 +37,23 @@ import {
   Text,
 } from "@earendil-works/pi-tui";
 
+// Strip only layout-breaking ANSI, preserve SGR color/style codes
+function stripLayoutAnsi(s: string): string {
+  return s
+    // Strip CSI sequences that are NOT SGR (final byte != m / 0x6D)
+    .replace(/\x1B\[[0-9;<=>?]*[ -/]*[\x40-\x6C\x6E-\x7E]/g, "")
+    // Strip OSC sequences (e.g. window title)
+    .replace(/\x1B\].*?(?:\x07|\x1B\\)/g, "")
+    // Strip charset selection
+    .replace(/\x1B\(B/g, "").replace(/\x1B\)B/g, "")
+    // Strip bracketed paste markers
+    .replace(/\x1B\[?2004[hl]/g, "")
+    // Strip CR and BEL
+    .replace(/\r/g, "").replace(/\x07/g, "")
+    // Strip other control chars except TAB, LF, ESC (needed for color codes)
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1A\x1C-\x1F]/g, "");
+}
+
 class SubagentPeek {
   private agentStates: Map<string, AgentState>;
   private agentOrder: string[];
@@ -122,8 +139,9 @@ class SubagentPeek {
       const end = Math.min(totalLines, start + SubagentPeek.VISIBLE_LINES);
 
       for (let i = start; i < end; i++) {
+        const clean = stripLayoutAnsi(contentLines[i] ?? "");
         lines.push(this.bordered(
-          truncateToWidth(contentLines[i] ?? "", innerW),
+          truncateToWidth(clean, innerW),
           innerW,
         ));
       }
