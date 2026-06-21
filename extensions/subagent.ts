@@ -7,9 +7,150 @@ import {
   SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
+import { keyHint } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { join } from "node:path";
+
+// ── Shared types ───────────────────────────────────────────────────
+
+interface AgentState {
+  agent: string;
+  output: string;
+  status: "running" | "done" | "error";
+}
+
+interface RunState {
+  agentStates: Map<string, AgentState>;
+  agentOrder: string[];
+}
+
+let currentRun: RunState | null = null;
+
+// ── Peek overlay component ─────────────────────────────────────────
+
+import {
+  matchesKey,
+  Key,
+  truncateToWidth,
+  visibleWidth,
+  Text,
+} from "@earendil-works/pi-tui";
+
+class SubagentPeek {
+  private agentStates: Map<string, AgentState>;
+  private agentOrder: string[];
+  private selectedIndex = 0;
+  private scrollOffset = 0;
+  private static VISIBLE_LINES = 20;
+  private onClose: () => void;
+
+  constructor(
+    agentStates: Map<string, AgentState>,
+    agentOrder: string[],
+    onClose: () => void,
+  ) {
+    this.agentStates = agentStates;
+    this.agentOrder = agentOrder;
+    this.onClose = onClose;
+  }
+
+  handleInput(data: string): void {
+    if (matchesKey(data, Key.left) && this.selectedIndex > 0) {
+      this.selectedIndex--;
+      this.scrollOffset = 0;
+    } else if (
+      matchesKey(data, Key.right) &&
+      this.selectedIndex < this.agentOrder.length - 1
+    ) {
+      this.selectedIndex++;
+      this.scrollOffset = 0;
+    } else if (matchesKey(data, Key.up)) {
+      const state = this.agentStates.get(
+        this.agentOrder[this.selectedIndex] ?? "",
+      );
+      const totalLines = state?.output.split("\n").length ?? 0;
+      const maxScroll = Math.max(0, totalLines - SubagentPeek.VISIBLE_LINES);
+      if (this.scrollOffset < maxScroll) {
+        this.scrollOffset++;
+      }
+    } else if (matchesKey(data, Key.down)) {
+      if (this.scrollOffset > 0) {
+        this.scrollOffset--;
+      }
+    } else if (matchesKey(data, Key.escape)) {
+      this.onClose();
+    }
+  }
+
+  private bordered(text: string, innerWidth: number): string {
+    const visible = visibleWidth(text);
+    const pad = Math.max(0, innerWidth - visible);
+    return `\u2502 ${text}${pad ? " ".repeat(pad) : ""} \u2502`;
+  }
+
+  render(width: number): string[] {
+    const lines: string[] = [];
+    const innerW = Math.max(1, width - 4);
+
+    // ── Agent tabs embedded in top border ────────
+    const tabs = this.agentOrder.map((key, i) => {
+      const state = this.agentStates.get(key);
+      const icon = state?.status === "done" ? "\u2713" : "\u25c9";
+      const label = `${icon} ${state?.agent ?? key}`;
+      if (i === this.selectedIndex) {
+        return `\x1b[7m ${label} \x1b[27m`;
+      }
+      return ` ${label} `;
+    });
+    const tabsStr = tabs.join("\u2502");
+    const truncatedTabs = truncateToWidth(tabsStr, width - 6);
+    const tabsVisible = visibleWidth(truncatedTabs);
+    const dashFill = Math.max(0, width - 6 - tabsVisible);
+    lines.push(
+      `\u250c\u2500\u2500 ${truncatedTabs} ${dashFill > 0 ? "\u2500".repeat(dashFill) : ""}\u2510`,
+    );
+
+    // ── Output of selected agent ─────────────────
+    const selectedKey = this.agentOrder[this.selectedIndex];
+    const state = this.agentStates.get(selectedKey ?? "");
+    if (state) {
+      const contentLines = state.output.split("\n");
+      const totalLines = contentLines.length;
+      const maxStart = Math.max(0, totalLines - SubagentPeek.VISIBLE_LINES);
+      const start = Math.max(0, maxStart - this.scrollOffset);
+      const end = Math.min(totalLines, start + SubagentPeek.VISIBLE_LINES);
+
+      for (let i = start; i < end; i++) {
+        lines.push(this.bordered(
+          truncateToWidth(contentLines[i] ?? "", innerW),
+          innerW,
+        ));
+      }
+
+      // ── Bottom border with help ────────────────
+      const help =
+        this.scrollOffset > 0
+          ? `\u2191 ${totalLines - end} more  \u2022  \u2193 scroll  \u2022  \u2190\u2192 agent  \u2022  Esc close`
+          : `\u2191\u2193 scroll  \u2022  \u2190\u2192 agent  \u2022  Esc close`;
+      const truncatedHelp = truncateToWidth(help, width - 6);
+      const helpVisible = visibleWidth(truncatedHelp);
+      const helpFill = Math.max(0, width - 6 - helpVisible);
+      lines.push(
+        `\u2514\u2500\u2500 ${truncatedHelp}${helpFill > 0 ? "\u2500".repeat(helpFill) : ""}\u2518`,
+      );
+    } else {
+      lines.push(`\u2502${new Array(innerW - 1).join(" ")} \u2502`);
+      lines.push(`\u2514${new Array(width - 1).join("\u2500")}\u2518`);
+    }
+
+    return lines;
+  }
+
+  invalidate(): void {
+    // No cache — render() reads live state every time
+  }
+}
 
 // ── Guard ──────────────────────────────────────────────────────────
 
@@ -92,7 +233,8 @@ async function spawnChild(
   agentName: string,
   task: string,
   cwd: string,
-  _signal?: AbortSignal,
+  _signal: AbortSignal | undefined,
+  onProgress?: (delta: string) => void,
 ): Promise<string> {
   const def = AGENTS[agentName];
   if (!def) throw new Error(`Unknown agent: ${agentName}`);
@@ -114,6 +256,25 @@ async function spawnChild(
 
   process.env[SUBAGENT_CHILD_ENV] = "1";
   try {
+    // ═══════════════════════════════════════════════════════════════════
+    // Retry compatibility with tool-call-revert extension
+    // ═══════════════════════════════════════════════════════════════════
+    //
+    // The resourceLoader loads global extensions from ~/.pi/agent/extensions/
+    // into every child session. If tool-call-revert.ts is installed, it
+    // automatically handles malformed tool calls (e.g. DeepSeek DSML text
+    // blocks) inside child sessions by reverting the bad response and
+    // retrying the prompt — transparently, before this spawnChild function
+    // sees the result.
+    //
+    // The subagent tool itself (in the parent session) does NOT add its own
+    // retry loop. Instead, it relies on tool-call-revert at the SDK level
+    // inside each child session. If tool-call-revert is NOT installed,
+    // child sessions get exactly one attempt per task.
+    //
+    // See: extensions/tool-call-revert.ts
+    // ═══════════════════════════════════════════════════════════════════
+
     const { session } = await createAgentSession({
       cwd,
       tools: def.tools,
@@ -124,19 +285,21 @@ async function spawnChild(
       settingsManager,
     });
 
-    let output = "";
+    const outputParts: string[] = [];
     const unsub = session.subscribe((ev) => {
       if (
         ev.type === "message_update" &&
         ev.assistantMessageEvent.type === "text_delta"
       ) {
-        output += ev.assistantMessageEvent.delta;
+        const delta = ev.assistantMessageEvent.delta;
+        outputParts.push(delta);
+        onProgress?.(delta);
       }
     });
 
     try {
       await session.prompt(`${def.systemPrompt}\n\nTask: ${task}`);
-      return output.trim();
+      return outputParts.join("").trim();
     } finally {
       unsub();
       session.dispose();
@@ -150,6 +313,51 @@ async function spawnChild(
 
 export default function (pi: ExtensionAPI) {
   if (process.env[SUBAGENT_CHILD_ENV] === "1") return;
+
+  // ── Keyboard shortcut: peek subagent overlay ───────────
+  pi.registerShortcut("alt+o", {
+    description: "Peek subagent output",
+    handler: async (ctx) => {
+      const run = currentRun;
+      if (!run || run.agentStates.size === 0) {
+        ctx.ui.notify("No subagent activity to peek", "info");
+        return;
+      }
+
+      await ctx.ui.custom<void>(
+        (tui, _theme, _kb, done) => {
+          const peek = new SubagentPeek(
+            run.agentStates,
+            run.agentOrder,
+            () => {
+              clearInterval(pollInterval);
+              done(undefined);
+            },
+          );
+          const pollInterval = setInterval(
+            () => tui.requestRender(),
+            350,
+          );
+          return {
+            render: (w) => peek.render(w),
+            invalidate: () => peek.invalidate(),
+            handleInput: (data) => {
+              peek.handleInput(data);
+              tui.requestRender();
+            },
+          };
+        },
+        {
+          overlay: true,
+          overlayOptions: {
+            anchor: "center",
+            width: "85%",
+            maxHeight: "90%",
+          },
+        },
+      );
+    },
+  });
 
   pi.registerTool({
     name: "subagent",
@@ -208,18 +416,78 @@ export default function (pi: ExtensionAPI) {
         }
       }
 
+      // ── Per-agent state tracking for live widget + overlay ──
+      const agentStates = new Map<string, AgentState>();
+      const agentOrder: string[] = [];
+      for (const t of tasks) {
+        const key = `${t.agent}::${t.task}`;
+        agentStates.set(key, {
+          agent: t.agent,
+          output: "",
+          status: "running",
+        });
+        agentOrder.push(key);
+      }
+
+      const runState: RunState = { agentStates, agentOrder };
+      currentRun = runState;
+
+      let lastWidgetUpdate = 0;
+      const updateWidget = () => {
+        const lines: string[] = [];
+        for (const [, state] of agentStates) {
+          const icon = state.status === "done" ? "✓" : "◉";
+          const lastLine = state.output.trim().split("\n").pop() || "working...";
+          const snippet = lastLine.length > 55
+            ? lastLine.slice(0, 52) + "..."
+            : lastLine;
+          lines.push(`${icon} ${state.agent}: ${snippet}`);
+        }
+        if (lines.length > 0) {
+          lines.push("Alt+O: peek agent output");
+        }
+        ctx.ui.setWidget("subagent", lines);
+      };
+
       if (tasks.length > 1) {
         onUpdate?.({ content: [{ type: "text",
           text: `→ running ${tasks.length} agents concurrently...` }] });
       }
 
       const results = await Promise.all(
-        tasks.map((t) => spawnChild(t.agent, t.task, ctx.cwd, signal)),
+        tasks.map((t) =>
+          spawnChild(t.agent, t.task, ctx.cwd, signal, (delta: string) => {
+            const key = `${t.agent}::${t.task}`;
+            const state = agentStates.get(key);
+            if (state) state.output += delta;
+
+            // Throttle widget updates to ~150ms intervals
+            const now = Date.now();
+            if (now - lastWidgetUpdate > 150) {
+              lastWidgetUpdate = now;
+              updateWidget();
+            }
+          })
+        ),
       );
 
+      // Mark done, final widget update, then clear
+      for (const t of tasks) {
+        const state = agentStates.get(`${t.agent}::${t.task}`);
+        if (state) state.status = "done";
+      }
+      updateWidget();
+      setTimeout(() => {
+        ctx.ui.setWidget("subagent", undefined);
+        if (currentRun === runState) currentRun = null;
+      }, 4000);
+
+      const summaryLines: string[] = [];
       const lines: string[] = [];
       for (let i = 0; i < tasks.length; i++) {
-        lines.push(`── ${tasks[i]!.agent} (${tasks[i]!.task.slice(0, 60)}) ──`);
+        const header = `── ${tasks[i]!.agent} (${tasks[i]!.task.slice(0, 60)}) ──`;
+        summaryLines.push(header);
+        lines.push(header);
         lines.push(results[i] || "(no output)");
         lines.push("");
       }
@@ -227,8 +495,24 @@ export default function (pi: ExtensionAPI) {
       return {
         content: [{ type: "text", text: lines.join("\n").trim() || "(no output)" }],
         isError: false,
-        details: {},
+        details: { summary: summaryLines.join("\n") },
       };
+    },
+
+    renderResult(result, { expanded, isPartial }, theme) {
+      if (isPartial) {
+        return new Text(theme.fg("accent", "→ running subagents..."), 0, 0);
+      }
+
+      const full = result.content?.[0]?.type === "text" ? result.content[0].text : "";
+
+      if (!expanded) {
+        const summary = result.details?.summary ?? full.split("\n").slice(0, 2).join("\n");
+        const text = theme.fg("success", "✓ ") + theme.fg("muted", summary);
+        return new Text(text + ` (${keyHint("app.tools.expand", "to expand")})`, 0, 0);
+      }
+
+      return new Text(full, 0, 0);
     },
   });
 }
