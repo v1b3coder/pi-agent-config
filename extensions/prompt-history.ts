@@ -72,6 +72,7 @@ const globalPrompts = loadHistory(); // loaded once at startup
 if (!(Editor.prototype as any)[PATCH_KEY]) {
   (Editor.prototype as any)[PATCH_KEY] = true;
 
+  // ── Patch handleInput: inject global prompts on first keypress ──────────
   const origHandleInput = Editor.prototype.handleInput;
 
   Editor.prototype.handleInput = function (this: any, data: string) {
@@ -85,30 +86,35 @@ if (!(Editor.prototype as any)[PATCH_KEY]) {
     }
     return origHandleInput.call(this, data);
   };
-}
 
-// ─── Extension ─────────────────────────────────────────────────────────────
+  // ── Patch addToHistory: persist every prompt added to history ───────────
+  // Catches !-commands, /-commands, extension commands, and normal messages
+  // alike — everything the user submits. The 'input' event only fires for
+  // normal messages, missing bang and built-in commands entirely.
+  const origAddToHistory = Editor.prototype.addToHistory;
 
-export default function (pi: ExtensionAPI) {
-  // Capture every submitted user prompt to persist globally.
-  pi.on("input", (event) => {
-    // Only persist prompts the user typed interactively.
-    // This avoids persisting internal tool-call messages, RPC requests,
-    // or extension-injected text — no heuristic string matching needed.
-    if (event.source !== "interactive") return { action: "continue" };
+  Editor.prototype.addToHistory = function (this: any, text: string) {
+    origAddToHistory.call(this, text);
 
-    const cleaned = event.text.replace(/[\x00-\x1f]/g, "").trim();
-    if (!cleaned) {
-      return { action: "continue" };
-    }
+    const trimmed = text.trim();
+    if (!trimmed) return;
 
-    const text =
+    const cleaned = trimmed.replace(/[\x00-\x1f]/g, "");
+    if (!cleaned) return;
+
+    const persisted =
       cleaned.length > MAX_PROMPT_LENGTH
         ? cleaned.slice(0, MAX_PROMPT_LENGTH)
         : cleaned;
 
-    persistPrompt(text);
+    persistPrompt(persisted);
+  };
+}
 
-    return { action: "continue" };
-  });
+// ─── Extension (empty shell) ───────────────────────────────────────────────
+// All logic is handled by the prototype patches above — no event hooks needed.
+
+export default function (_pi: ExtensionAPI) {
+  // Extension exists solely to be auto-discovered by pi's extension loader.
+  // The prototype patches run at module scope and handle everything.
 }
