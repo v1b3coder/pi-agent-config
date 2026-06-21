@@ -415,21 +415,9 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "pty_start",
     label: "PTY Start",
-    description:
-      "Start a new persistent interactive CLI session (SSH, REPL, db shell, dev server).\n" +
-      "The session runs in a real PTY — cd, export, source .venv all carry over.\n" +
-      "Use pty_send to type commands, pty_drain / pty_tail to read output.\n\n" +
-      "Use this over `bash` when you need STATE to persist across commands.\n" +
-      "For one-shot commands, use `bash` instead (simpler, cheaper).",
-    promptSnippet: "pty_start - spawn a persistent interactive CLI session (SSH, REPL, db shell)",
-    promptGuidelines: [
-      "- Prefer pty_start + pty_send over `bash` when state must persist (cd, export, source, venv)",
-      "- Prefer `bash` over pty_start for single commands or piped pipelines",
-      "- After pty_send, read output with pty_drain (new-only) or pty_tail (last N lines)",
-      "- Always kill sessions with pty_kill when done to free resources",
-    ],
+    description: "Spawn a persistent interactive CLI session (SSH, REPL, db shell). Stateful: cd/export/venv carry over. Use over `bash` when state must persist.",
     parameters: Type.Object({
-      command: Type.String({ description: "Shell command to start (e.g. \"ssh host\", \"python3\", \"psql -U user db\")" }),
+      command: Type.String({ description: "Shell command to start (e.g. ssh host, python3, psql -U user db)" }),
       cwd: Type.Optional(Type.String({ description: "Working directory for the new session" })),
     }),
     async execute(_id, params, _signal, onUpdate, ctx) {
@@ -445,11 +433,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "pty_send",
     label: "PTY Send",
-    description:
-      "Send text input to a running PTY session.\n" +
-      "By default text is sent as-is (no trailing newline).\n" +
-      "Use submit: true to append Enter (for shell commands, full REPL expressions).\n" +
-      "After sending, call pty_drain({ sessionId }) to read the new output.",
+    description: "Send text to a running PTY session. submit:true appends \\n (Enter). Then use pty_drain to read response.",
     parameters: Type.Object({
       sessionId: Type.String({ description: "Session ID from pty_start" }),
       input: Type.String({ description: "Text to send to the session" }),
@@ -473,11 +457,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "pty_drain",
     label: "PTY Drain",
-    description:
-      "Read new output from a PTY session since the last drain read.\n" +
-      "This is the token-efficient way to poll — it only returns what's NEW.\n" +
-      "Returns empty string if nothing new has been produced.\n" +
-      "does not advance the drain cursor — use pty_tail to look back without consuming.",
+    description: "Read new output since last drain. Advances cursor (new-only, token-efficient). Empty = nothing new. Use pty_tail to peek without advancing.",
     parameters: Type.Object({
       sessionId: Type.String({ description: "Session ID from pty_start" }),
     }),
@@ -493,10 +473,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "pty_tail",
     label: "PTY Tail",
-    description:
-      "Read the last N lines of output from a PTY session (non-destructive).\n" +
-      "Does not advance the drain cursor — safe to use for ad-hoc context review.\n" +
-      "Max 200 lines.",
+    description: "Read last N lines from a PTY session. Non-destructive (does not advance drain cursor). Max 200 lines.",
     parameters: Type.Object({
       sessionId: Type.String({ description: "Session ID from pty_start" }),
       lines: Type.Optional(Type.Integer({ description: "Number of lines to return (1–200)", default: 30 })),
@@ -514,7 +491,6 @@ export default function (pi: ExtensionAPI) {
     name: "pty_list",
     label: "PTY List",
     description: "List all active PTY sessions with status, runtime, and command.",
-    promptSnippet: "pty_list - show all active PTY sessions",
     parameters: Type.Object({}),
     async execute(_id, _params, _signal, _onUpdate, ctx) {
       if (!manager) return { content: [{ type: "text", text: "PTY manager not initialized" }], isError: true, details: {} };
@@ -528,11 +504,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "pty_kill",
     label: "PTY Kill",
-    description:
-      "Terminate a PTY session and return its final output.\n" +
-      "Safe to call on already-dead sessions (returns final output and unregisters).\n" +
-      "Always kill sessions you no longer need to free resources.",
-    promptSnippet: "pty_kill - terminate a PTY session and return final output",
+    description: "Terminate a PTY session and return final output. Safe on dead sessions.",
     parameters: Type.Object({
       sessionId: Type.String({ description: "Session ID from pty_start" }),
     }),
