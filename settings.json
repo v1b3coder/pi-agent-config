@@ -1,5 +1,5 @@
 {
-  "lastChangelogVersion": "0.80.2",
+  "lastChangelogVersion": "0.84.2",
   "defaultProvider": "litellm",
   "defaultModel": "deepseek-ai/DeepSeek-V4-Flash",
   "compaction": {
@@ -8,12 +8,6 @@
     "keepRecentTokens": 20000
   },
   "packages": [
-    {
-      "source": "npm:pi-provider-litellm",
-      "extensions": [
-        "+dist/index.js"
-      ]
-    },
     {
       "source": "npm:pi-skill-tavily",
       "skills": [
