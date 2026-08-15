@@ -1,5 +1,5 @@
 {
-  "lastChangelogVersion": "0.79.9",
+  "lastChangelogVersion": "0.80.2",
   "defaultProvider": "litellm",
   "defaultModel": "deepseek-ai/DeepSeek-V4-Flash",
   "compaction": {
@@ -48,7 +48,7 @@
     "PI_EXT_NTFY_TAGS": "robot",
     "PI_EXT_NTFY_TIMEOUT_MS": 60000
   },
-  "defaultThinkingLevel": "medium",
+  "defaultThinkingLevel": "high",
   "enableInstallTelemetry": false,
   "terminal": {
     "showTerminalProgress": true
@@ -62,6 +62,7 @@
     "litellm/beast/big",
     "litellm/beast/small",
     "litellm/Qwen/Qwen3.6-27B-FP8",
+    "litellm/morosystems/ThinkingCap-Qwen3.6-27B-NVFP4",
     "litellm/deepseek-ai/DeepSeek-V4-Flash"
   ],
   "theme": "dark"
