@@ -55,9 +55,11 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 const PROVIDER = "litellm";
 const ENV_BASE_URL = "LITELLM_BASE_URL";
 const ENV_API_KEY = "LITELLM_API_KEY";
+const ENV_MAX_VLLM_OUTPUT_TOKENS = "LITELLM_MAX_VLLM_OUTPUT_TOKENS";
 const DISCOVERY_TIMEOUT_MS = 5000;
 const DEFAULT_CONTEXT_WINDOW = 128_000;
 const DEFAULT_MAX_TOKENS = 16_384;
+const DEFAULT_VLLM_MAX_OUTPUT_TOKENS = 65_536;
 
 // ─── small helpers ─────────────────────────────────────────────────────────
 
@@ -72,6 +74,25 @@ function num(value: unknown): number | undefined {
 
 function bool(value: unknown): boolean | undefined {
   return typeof value === "boolean" ? value : undefined;
+}
+
+/** Optional env override for the per-turn output cap on vLLM-style routes. */
+function configuredMaxOutputTokens(raw: string | undefined, fallback: number): number {
+  if (raw === undefined) return fallback;
+  const value = Number(raw.trim());
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
+}
+
+/** vLLM mirrors max_model_len — one combined input+output budget — into both
+ *  max_input_tokens and max_output_tokens. Advertised literally, max_output_tokens
+ *  makes pi request ~all remaining context and overshoot the real budget by its
+ *  token-counting error → hard 400s on large sessions. Cap it instead; contextWindow
+ *  stays untouched (still correct for compaction). Detected via litellm_provider, or
+ *  via mirrored budgets (max_input_tokens present and output >= input) as a heuristic. */
+function vllmCappedMaxTokens(modelInfo: Record<string, any>, advertised: number, cap: number): number {
+  const maxInput = num(modelInfo.max_input_tokens);
+  const isVllmStyle = modelInfo.litellm_provider === "hosted_vllm" || (maxInput !== undefined && advertised >= maxInput);
+  return isVllmStyle ? Math.min(advertised, cap) : advertised;
 }
 
 /** Strip trailing slashes and an optional `/v1` suffix. No scheme policing:
@@ -122,7 +143,7 @@ async function fetchJson(url: string, apiKey: string, signal?: AbortSignal) {
 }
 
 /** /model/info entries: per-token pricing, context window, reasoning flags. */
-function mapModelInfoEntry(entry: any): LmModel | undefined {
+function mapModelInfoEntry(entry: any, vllmMaxOutputTokens: number): LmModel | undefined {
   const id = typeof entry?.model_name === "string" ? entry.model_name : undefined;
   if (!id) return undefined;
   const info = entry.model_info ?? {};
@@ -164,17 +185,19 @@ function mapModelInfoEntry(entry: any): LmModel | undefined {
       cacheWrite: (num(info.cache_creation_input_token_cost) ?? catalog?.cost?.cacheWrite ?? 0) * 1_000_000,
     },
     contextWindow: num(info.max_input_tokens) ?? DEFAULT_CONTEXT_WINDOW,
-    maxTokens: num(info.max_output_tokens) ?? DEFAULT_MAX_TOKENS,
+    maxTokens: vllmCappedMaxTokens(info, num(info.max_output_tokens) ?? DEFAULT_MAX_TOKENS, vllmMaxOutputTokens),
     compat: { supportsStore: false },
     ...(/^responses$/i.test(mode ?? "") ? { api: "openai-responses" as const } : {}),
   };
 }
 
 /** /v1/models entries (fallback for 401/403/404 on /model/info): sparse — fill from catalog. */
-function mapModelsListEntry(entry: any): LmModel | undefined {
+function mapModelsListEntry(entry: any, vllmMaxOutputTokens: number): LmModel | undefined {
   const id = typeof entry?.id === "string" ? entry.id : undefined;
   if (!id) return undefined;
   const catalog = findCatalogModel(id);
+  const info = entry?.model_info ?? {};
+  const advertised = num(info.max_output_tokens) ?? catalog?.maxTokens ?? DEFAULT_MAX_TOKENS;
   return {
     id,
     name: catalog?.name ?? `${id} (no metadata)`,
@@ -183,17 +206,22 @@ function mapModelsListEntry(entry: any): LmModel | undefined {
     input: catalog?.input ?? ["text"],
     cost: catalog?.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: catalog?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
-    maxTokens: catalog?.maxTokens ?? DEFAULT_MAX_TOKENS,
+    maxTokens: vllmCappedMaxTokens(info, advertised, vllmMaxOutputTokens),
     compat: { supportsStore: false },
   };
 }
 
-async function discoverModels(baseUrl: string, apiKey: string, signal?: AbortSignal): Promise<LmModel[]> {
+async function discoverModels(
+  baseUrl: string,
+  apiKey: string,
+  vllmMaxOutputTokens: number,
+  signal?: AbortSignal,
+): Promise<LmModel[]> {
   const info = await fetchJson(`${baseUrl}/model/info`, apiKey, signal);
   if (info.ok) {
     const entries = Array.isArray(info.data?.data) ? info.data.data : [];
     // Wildcard rows ("lemonade/*") are not usable model ids — drop them.
-    return entries.map(mapModelInfoEntry).filter((model): model is LmModel => model !== undefined && !model.id.includes("*"));
+    return entries.map((entry) => mapModelInfoEntry(entry, vllmMaxOutputTokens)).filter((model): model is LmModel => model !== undefined && !model.id.includes("*"));
   }
   if (![401, 403, 404].includes(info.status)) {
     throw new Error(`/model/info returned HTTP ${info.status}`);
@@ -201,7 +229,7 @@ async function discoverModels(baseUrl: string, apiKey: string, signal?: AbortSig
   const list = await fetchJson(`${baseUrl}/v1/models`, apiKey, signal);
   if (!list.ok) throw new Error(`/v1/models returned HTTP ${list.status}`);
   const entries = Array.isArray(list.data?.data) ? list.data.data : [];
-  return entries.map(mapModelsListEntry).filter((model): model is LmModel => model !== undefined);
+  return entries.map((entry) => mapModelsListEntry(entry, vllmMaxOutputTokens)).filter((model): model is LmModel => model !== undefined);
 }
 
 // ─── extension factory ─────────────────────────────────────────────────────
@@ -218,9 +246,13 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   }
 
   const root = normalizeBaseUrl(base);
+  const vllmMaxOutputTokens = configuredMaxOutputTokens(
+    process.env[ENV_MAX_VLLM_OUTPUT_TOKENS],
+    DEFAULT_VLLM_MAX_OUTPUT_TOKENS,
+  );
   let models: LmModel[] = [];
   try {
-    models = await discoverModels(root, key);
+    models = await discoverModels(root, key, vllmMaxOutputTokens);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     process.stderr.write(
