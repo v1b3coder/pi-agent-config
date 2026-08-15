@@ -1,0 +1,26 @@
+{
+  "skill_name": "apk-reverse-engineer",
+  "evals": [
+    {
+      "id": 0,
+      "name": "annotation-mapping",
+      "prompt": "I've decompiled a ride-hailing APK with jadx and all the Retrofit annotations are obfuscated into short names in defpackage/. I need to figure out which annotation class maps to @POST, @GET, @Body, etc. so I can read the API surface. Walk me through the process of mapping these annotations step by step, including what to look for in the decompiled code and how to verify I got it right. Use the apk-reverse-engineer skill.",
+      "expected_output": "Step-by-step guidance showing how to identify annotation classes, distinguish POST vs GET by usage context, map Body/Path/Query annotations, verify by cross-referencing with Retrofit interface files, and produce a mapping document.",
+      "files": []
+    },
+    {
+      "id": 1,
+      "name": "frida-traffic-capture",
+      "prompt": "I need to capture API traffic from an Android app that uses certificate pinning. I don't have a rooted device and can't use mitmproxy. How do I use Frida to get the data without dealing with TLS certificate issues? Show me the Frida scripts I need and walk me through the setup step by step. Use the apk-reverse-engineer skill.",
+      "expected_output": "Non-MITM approach using Frida to intercept HTTP traffic at the app level, including Frida setup commands, JavaScript hook scripts for OkHttp/Retrofit, and explanation of why this avoids TLS issues. Mention specific hook points like OkHttpClient.newCall, Response.body, and Retrofit interface methods.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "name": "auth-flow-tracing",
+      "prompt": "I found the API endpoints in a decompiled Android app, but I can't figure out how authentication works. The headers include an Authorization: Bearer <token> that I need to trace back to find where it comes from. The code is heavily obfuscated and the auth flow is spread across many classes. Walk me through the backwards tracing approach and tell me what patterns to look for. Use the apk-reverse-engineer skill.",
+      "expected_output": "Backwards tracing methodology starting from the API endpoint, through header injection (OkHttp Interceptor), following token construction chain, identifying multiple auth paths (direct login, OAuth/SSO, AccountManager), with specific patterns to recognize and Frida-based validation approach.",
+      "files": []
+    }
+  ]
+}
