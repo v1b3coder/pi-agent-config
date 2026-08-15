@@ -81,4 +81,5 @@ Strong criteria ("test for invalid inputs passes") let you loop independently. W
 - No amend unless asked.
 - Unrecognized changes: assume other agent; keep going; focus your changes. If it causes issues, stop + ask user.
 - When developing python, always create/use .venv
+- Never use sudo or try to escalate user permissions. If you need to update any system settings to complete the task, like changing udev rules to access the device, give user clear instructions what and how to do by himself.
 
