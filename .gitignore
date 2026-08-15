@@ -9,7 +9,7 @@ node_modules/
 npm/
 mcp-oauth/
 sessions/
-litellm-models.json
+models-store.json
 run-history.jsonl
 mcp-cache.json
 pi-crash.log
