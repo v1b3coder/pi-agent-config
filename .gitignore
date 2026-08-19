@@ -10,6 +10,7 @@ npm/
 mcp-oauth/
 sessions/
 models-store.json
+litellm-cache.json
 run-history.jsonl
 mcp-cache.json
 pi-crash.log

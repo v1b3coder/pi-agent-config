@@ -44,19 +44,26 @@
  *   • no `cacheControlFormat: "anthropic"` compat — no Claude routes here.
  *
  * Trade-off: models are registered statically at startup (discovery is one
- * fast LAN request, 5 s timeout). There is no offline model cache — if the
- * proxy is unreachable when pi starts, the provider is registered without
- * models; run /reload once the proxy is back. If a Claude route is ever
- * added through this proxy, add the anthropic compat flag back.
+ * fast LAN request, 5 s timeout, retried once). If live discovery fails, the
+ * provider falls back to the last successful model list cached in
+ * `litellm-cache.json` in the agent dir — delete that file to force a clean
+ * fetch. If a Claude route is ever added through this proxy, add the
+ * anthropic compat flag back.
  */
+import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { getModels, getProviders } from "@earendil-works/pi-ai/compat";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const PROVIDER = "litellm";
 const ENV_BASE_URL = "LITELLM_BASE_URL";
 const ENV_API_KEY = "LITELLM_API_KEY";
 const ENV_MAX_VLLM_OUTPUT_TOKENS = "LITELLM_MAX_VLLM_OUTPUT_TOKENS";
 const DISCOVERY_TIMEOUT_MS = 5000;
+const DISCOVERY_ATTEMPTS = 2; // one retry: a single LAN/DNS hiccup must not empty the model list
+const RETRY_DELAY_MS = 500;
+const CACHE_FILE = "litellm-cache.json";
+const CACHE_VERSION = 1;
 const DEFAULT_CONTEXT_WINDOW = 128_000;
 const DEFAULT_MAX_TOKENS = 16_384;
 const DEFAULT_VLLM_MAX_OUTPUT_TOKENS = 65_536;
@@ -142,6 +149,23 @@ async function fetchJson(url: string, apiKey: string, signal?: AbortSignal) {
   return { ok: true as const, status: response.status, data: (await response.json()) as Record<string, any> };
 }
 
+/** fetchJson with a bounded retry: transient failures (network errors,
+ *  timeouts, HTTP 5xx) get one more attempt; 4xx responses are terminal. */
+async function fetchJsonWithRetry(url: string, apiKey: string, signal?: AbortSignal) {
+  let lastError: Error = new Error("no attempt made");
+  for (let attempt = 1; attempt <= DISCOVERY_ATTEMPTS; attempt++) {
+    try {
+      const result = await fetchJson(url, apiKey, signal);
+      if (result.ok || result.status < 500) return result;
+      lastError = new Error(`HTTP ${result.status}`);
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+    }
+    if (attempt < DISCOVERY_ATTEMPTS) await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
+  }
+  throw lastError;
+}
+
 /** /model/info entries: per-token pricing, context window, reasoning flags. */
 function mapModelInfoEntry(entry: any, vllmMaxOutputTokens: number): LmModel | undefined {
   const id = typeof entry?.model_name === "string" ? entry.model_name : undefined;
@@ -217,7 +241,7 @@ async function discoverModels(
   vllmMaxOutputTokens: number,
   signal?: AbortSignal,
 ): Promise<LmModel[]> {
-  const info = await fetchJson(`${baseUrl}/model/info`, apiKey, signal);
+  const info = await fetchJsonWithRetry(`${baseUrl}/model/info`, apiKey, signal);
   if (info.ok) {
     const entries = Array.isArray(info.data?.data) ? info.data.data : [];
     // Wildcard rows ("lemonade/*") are not usable model ids — drop them.
@@ -226,10 +250,57 @@ async function discoverModels(
   if (![401, 403, 404].includes(info.status)) {
     throw new Error(`/model/info returned HTTP ${info.status}`);
   }
-  const list = await fetchJson(`${baseUrl}/v1/models`, apiKey, signal);
+  const list = await fetchJsonWithRetry(`${baseUrl}/v1/models`, apiKey, signal);
   if (!list.ok) throw new Error(`/v1/models returned HTTP ${list.status}`);
   const entries = Array.isArray(list.data?.data) ? list.data.data : [];
   return entries.map((entry) => mapModelsListEntry(entry, vllmMaxOutputTokens)).filter((model): model is LmModel => model !== undefined);
+}
+
+// ─── disk cache (last successful discovery, keyed by proxy URL) ────────────
+
+type CachedModels = {
+  version: typeof CACHE_VERSION;
+  baseUrl: string;
+  vllmMaxOutputTokens: number;
+  fetchedAt: string;
+  models: LmModel[];
+};
+
+/** Fallback used only when live discovery fails; stale entries are harmless
+ *  because a fresh fetch always wins on the next start. */
+function readModelCache(baseUrl: string, vllmMaxOutputTokens: number): LmModel[] | undefined {
+  try {
+    const cached = JSON.parse(readFileSync(join(getAgentDir(), CACHE_FILE), "utf-8")) as Partial<CachedModels>;
+    if (
+      cached.version !== CACHE_VERSION ||
+      cached.baseUrl !== baseUrl ||
+      cached.vllmMaxOutputTokens !== vllmMaxOutputTokens ||
+      !Array.isArray(cached.models) ||
+      cached.models.length === 0
+    ) {
+      return undefined;
+    }
+    return cached.models as LmModel[];
+  } catch {
+    return undefined; // missing or unreadable — start without models
+  }
+}
+
+function writeModelCache(baseUrl: string, vllmMaxOutputTokens: number, models: LmModel[]): void {
+  if (models.length === 0) return; // never clobber a good cache with an empty list
+  try {
+    const cached: CachedModels = {
+      version: CACHE_VERSION,
+      baseUrl,
+      vllmMaxOutputTokens,
+      fetchedAt: new Date().toISOString(),
+      models,
+    };
+    writeFileSync(join(getAgentDir(), CACHE_FILE), `${JSON.stringify(cached, null, 2)}\n`, "utf-8");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`litellm: could not write model cache (${message})\n`);
+  }
 }
 
 // ─── extension factory ─────────────────────────────────────────────────────
@@ -253,11 +324,19 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   let models: LmModel[] = [];
   try {
     models = await discoverModels(root, key, vllmMaxOutputTokens);
+    writeModelCache(root, vllmMaxOutputTokens, models);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    process.stderr.write(
-      `litellm: model discovery failed (${message}); provider registered without models — run /reload once the proxy is reachable.\n`,
-    );
+    models = readModelCache(root, vllmMaxOutputTokens) ?? [];
+    if (models.length > 0) {
+      process.stderr.write(
+        `litellm: live model discovery failed (${message}); using ${models.length} cached models (${CACHE_FILE} in the agent dir) — delete the file to force a clean fetch.\n`,
+      );
+    } else {
+      process.stderr.write(
+        `litellm: model discovery failed (${message}); provider registered without models — run /reload once the proxy is reachable.\n`,
+      );
+    }
   }
 
   pi.registerProvider(PROVIDER, {
