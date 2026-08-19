@@ -43,12 +43,13 @@
  *     calculation gives the same numbers; the header hook was redundant;
  *   • no `cacheControlFormat: "anthropic"` compat — no Claude routes here.
  *
- * Trade-off: models are registered statically at startup (discovery is one
- * fast LAN request, 5 s timeout, retried once). If live discovery fails, the
- * provider falls back to the last successful model list cached in
- * `litellm-cache.json` in the agent dir — delete that file to force a clean
- * fetch. If a Claude route is ever added through this proxy, add the
- * anthropic compat flag back.
+ * Trade-off: models are registered statically at startup. The cached model
+ * list (`litellm-cache.json` in the agent dir) is authoritative — when it
+ * exists it is used as-is with no network round-trip; live discovery (one
+ * fast LAN request, 5 s timeout, retried once) runs only when the cache is
+ * missing, to create it. Delete the cache file to force a refresh.
+ * If a Claude route is ever added through this proxy, add the anthropic
+ * compat flag back.
  */
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -266,8 +267,8 @@ type CachedModels = {
   models: LmModel[];
 };
 
-/** Fallback used only when live discovery fails; stale entries are harmless
- *  because a fresh fetch always wins on the next start. */
+/** Primary model source: when present, models are served from here and the
+ *  proxy is not queried at startup at all. */
 function readModelCache(baseUrl: string, vllmMaxOutputTokens: number): LmModel[] | undefined {
   try {
     const cached = JSON.parse(readFileSync(join(getAgentDir(), CACHE_FILE), "utf-8")) as Partial<CachedModels>;
@@ -322,19 +323,17 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     DEFAULT_VLLM_MAX_OUTPUT_TOKENS,
   );
   let models: LmModel[] = [];
-  try {
-    models = await discoverModels(root, key, vllmMaxOutputTokens);
-    writeModelCache(root, vllmMaxOutputTokens, models);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    models = readModelCache(root, vllmMaxOutputTokens) ?? [];
-    if (models.length > 0) {
+  const cached = readModelCache(root, vllmMaxOutputTokens);
+  if (cached) {
+    models = cached;
+  } else {
+    try {
+      models = await discoverModels(root, key, vllmMaxOutputTokens);
+      writeModelCache(root, vllmMaxOutputTokens, models);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
       process.stderr.write(
-        `litellm: live model discovery failed (${message}); using ${models.length} cached models (${CACHE_FILE} in the agent dir) — delete the file to force a clean fetch.\n`,
-      );
-    } else {
-      process.stderr.write(
-        `litellm: model discovery failed (${message}); provider registered without models — run /reload once the proxy is reachable.\n`,
+        `litellm: model discovery failed (${message}) and no cached model list exists; provider registered without models — run /reload once the proxy is reachable.\n`,
       );
     }
   }
