@@ -1,7 +1,7 @@
 {
   "lastChangelogVersion": "0.84.2",
   "defaultProvider": "litellm",
-  "defaultModel": "deepseek-ai/DeepSeek-V4-Flash",
+  "defaultModel": "zai-org/GLM-5.3-Flash",
   "compaction": {
     "enabled": true,
     "reserveTokens": 40960,
@@ -57,7 +57,8 @@
     "litellm/beast/small",
     "litellm/Qwen/Qwen3.6-27B-FP8",
     "litellm/morosystems/ThinkingCap-Qwen3.6-27B-NVFP4",
-    "litellm/deepseek-ai/DeepSeek-V4-Flash"
+    "litellm/deepseek-ai/DeepSeek-V4-Flash",
+    "litellm/zai-org/GLM-5.3-Flash"
   ],
   "theme": "dark"
 }
