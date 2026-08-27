@@ -24,6 +24,9 @@
  *             6.  $cwd/.env                          (project defaults)
  *    (highest) 7.  $cwd/.env.local                    (local overrides)
  *
+ *    Tiers 5–7 apply only when the project is trusted (trust.json decision,
+ *    else defaultProjectTrust === "always"); see isProjectTrusted().
+ *
  * Within each source, keys are applied in iteration / line order.
  */
 
@@ -180,11 +183,38 @@ function loadDotenvFile(filePath: string): Record<string, string> {
   }
 }
 
+// ─── Project trust ──────────────────────────────────────────────────────────
+
+/**
+ * Mirrors pi's resolveProjectTrusted() saved-decision path: a saved yes/no in
+ * trust.json wins, otherwise defaultProjectTrust ("always" trusts, everything
+ * else declines). Never prompts. Project tiers are only injected for trusted
+ * projects, so an untrusted repo cannot override e.g. LITELLM_API_KEY via its
+ * .env.local.
+ */
+function isProjectTrusted(cwd: string, home: string): boolean {
+  try {
+    const trustData = JSON.parse(readFileSync(join(home, ".pi", "agent", "trust.json"), "utf-8")) as Record<string, boolean>;
+    if (typeof trustData[cwd] === "boolean") return trustData[cwd];
+  } catch {
+    // no trust.json or unreadable — fall through to default
+  }
+  try {
+    const data = JSON.parse(readFileSync(join(home, ".pi", "agent", "settings.json"), "utf-8")) as { defaultProjectTrust?: string };
+    return data?.defaultProjectTrust === "always";
+  } catch {
+    return false;
+  }
+}
+
 // ─── Extension factory ──────────────────────────────────────────────────────
 
 export default function (_pi: ExtensionAPI): void {
   const home = process.env.HOME || process.env.USERPROFILE || "";
   const cwd = process.cwd();
+
+  // Project tiers are only honored for trusted projects (see project_trust gate).
+  const projectTrusted = isProjectTrusted(cwd, home);
 
   // Sources in priority order: later overrides earlier.
   // Actual shell env vars are the base (tier 1).
@@ -195,12 +225,17 @@ export default function (_pi: ExtensionAPI): void {
     { label: "~/.pi/agent/.env",          vars: loadDotenvFile(join(home, ".pi", "agent", ".env")) },
     // Tier 4: global dotenv local overrides
     { label: "~/.pi/agent/.env.local",    vars: loadDotenvFile(join(home, ".pi", "agent", ".env.local")) },
-    // Tier 5: per-project Pi settings
-    { label: ".pi/settings.json",         vars: loadSettingsEnv(join(cwd, ".pi", "settings.json")) },
-    // Tier 6: project defaults
-    { label: ".env",                      vars: loadDotenvFile(join(cwd, ".env")) },
-    // Tier 7: local overrides (highest)
-    { label: ".env.local",                vars: loadDotenvFile(join(cwd, ".env.local")) },
+    // Tiers 5–7: per-project sources — gated on project trust
+    ...(projectTrusted
+      ? [
+          // Tier 5: per-project Pi settings
+          { label: ".pi/settings.json", vars: loadSettingsEnv(join(cwd, ".pi", "settings.json")) },
+          // Tier 6: project defaults
+          { label: ".env",              vars: loadDotenvFile(join(cwd, ".env")) },
+          // Tier 7: local overrides (highest)
+          { label: ".env.local",        vars: loadDotenvFile(join(cwd, ".env.local")) },
+        ]
+      : []),
   ];
 
   // Apply sources in priority order.

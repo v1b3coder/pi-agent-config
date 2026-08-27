@@ -28,7 +28,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { Type } from "typebox";
-import { complete } from "@earendil-works/pi-ai";
 import {
 	getAgentDir,
 	type ExtensionAPI as _ExtensionAPI,
@@ -194,16 +193,12 @@ async function callModel(
 	temperature: number,
 	signal?: AbortSignal,
 ): Promise<AssistantMessage> {
-	const auth = await registry.getApiKeyAndHeaders(model);
-	if (!auth.ok || !auth.apiKey) throw new Error(`No API key for ${modelDisplay(model)}`);
-
-	return complete(model, { systemPrompt, messages: [{ role: "user", content: userText, timestamp: Date.now() }] }, {
-		apiKey: auth.apiKey,
-		headers: auth.headers,
-		signal,
-		maxTokens,
-		temperature,
-	});
+	// Resolves auth internally (errors surface as failed assistant messages per-model).
+	return registry.complete(
+		model,
+		{ systemPrompt, messages: [{ role: "user", content: userText, timestamp: Date.now() }] },
+		{ signal, maxTokens, temperature },
+	);
 }
 
 function getText(msg: AssistantMessage): string {

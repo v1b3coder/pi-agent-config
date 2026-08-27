@@ -1,9 +1,8 @@
 import {
-  AuthStorage,
   createAgentSession,
   DefaultResourceLoader,
   getAgentDir,
-  ModelRegistry,
+  ModelRuntime,
   SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
@@ -259,24 +258,30 @@ async function spawnChild(
   agentName: string,
   task: string,
   cwd: string,
-  _signal: AbortSignal | undefined,
+  signal: AbortSignal | undefined,
   onProgress?: (delta: string) => void,
 ): Promise<string> {
   const def = AGENTS[agentName];
   if (!def) throw new Error(`Unknown agent: ${agentName}`);
 
   const agentDir = getAgentDir();
-  const authStorage = AuthStorage.create(join(agentDir, "auth.json"));
-  const modelRegistry = ModelRegistry.create(authStorage, join(agentDir, "models.json"));
   const settingsManager = SettingsManager.create(cwd, agentDir);
 
   const resourceLoader = new DefaultResourceLoader({ cwd, agentDir, settingsManager });
   await resourceLoader.reload();
 
-  // Apply provider registrations from extensions (e.g., pi-provider-litellm)
+  // Apply provider registrations queued by extensions (e.g. litellm.ts) to a
+  // canonical ModelRuntime and pass it explicitly. Must happen BEFORE
+  // createAgentSession: AgentSession constructs its ExtensionRunner (which
+  // would flush the same queue) only after findInitialModel has already
+  // picked the default model — too late for settings defaultProvider=litellm.
+  const modelRuntime = await ModelRuntime.create({
+    authPath: join(agentDir, "auth.json"),
+    modelsPath: join(agentDir, "models.json"),
+  });
   const extResult = resourceLoader.getExtensions();
   for (const { name, config } of extResult.runtime.pendingProviderRegistrations) {
-    modelRegistry.registerProvider(name, config);
+    modelRuntime.registerProvider(name, config);
   }
   extResult.runtime.pendingProviderRegistrations = [];
 
@@ -304,13 +309,21 @@ async function spawnChild(
 
     const { session } = await createAgentSession({
       cwd,
+      agentDir,
       tools: def.tools,
-      authStorage,
-      modelRegistry,
+      modelRuntime,
       resourceLoader,
       sessionManager: SessionManager.inMemory(cwd),
       settingsManager,
     });
+
+    // Abort wiring: Esc / ctx.abort() in the parent must stop the child run.
+    if (signal?.aborted) {
+      session.dispose();
+      throw new Error("cancelled before start");
+    }
+    const killSession = () => { void session.abort(); };
+    signal?.addEventListener("abort", killSession, { once: true });
 
     const outputParts: string[] = [];
     const unsub = session.subscribe((ev) => {
@@ -328,6 +341,7 @@ async function spawnChild(
       await session.prompt(`${def.systemPrompt}\n\nTask: ${task}`);
       return outputParts.join("").trim();
     } finally {
+      signal?.removeEventListener("abort", killSession);
       unsub();
       session.dispose();
     }

@@ -70,7 +70,7 @@ export default function webSearchExtension(pi: ExtensionAPI) {
 				text.setText(`— ${count} result${count !== 1 ? "s" : ""}`);
 			} else {
 				// Expanded mode: show full results
-				const fullText = result
+				const fullText = result.content
 					.filter((c: any) => c.type === "text")
 					.map((c: any) => c.text ?? "")
 					.join("\n");
