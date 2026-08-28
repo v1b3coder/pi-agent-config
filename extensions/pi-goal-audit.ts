@@ -254,8 +254,9 @@ export default function piGoalAudit(pi: ExtensionAPI) {
 			return { content: [{ type: "text", text: `Goal is ${goal.status}; completion does not apply.` }], isError: true };
 		}
 
-		// Snapshot: the goal must not change while the audit is running (e.g.
-		// /goal clear mid-audit). All decisions below use the snapshot.
+		// Snapshot: detects goal invalidation during the audit (cleared /
+		// replaced / no longer active). Token-accounting updates from
+		// turn_end reassign `goal` but keep id+status — not a change.
 		const goalSnapshot = goal;
 
 		// ── Audit phase ────────────────────────────────────────────────
@@ -280,8 +281,13 @@ export default function piGoalAudit(pi: ExtensionAPI) {
 			unsubTerminal?.();
 		}
 
-		// ── Goal state changed during the audit → never persist ───────
-		if (goal !== goalSnapshot) {
+		// ── Goal invalidated during the audit → never persist ───
+		// NOTE: turn_end token accounting reassigns `goal` (a NEW object)
+		// on every turn — that is NOT a state change. Only a clear, a
+		// replaced objective (different id), or a status transition away
+		// from active invalidate the audit result.
+		const goalInvalidated = !goal || goal.id !== goalSnapshot.id || goal.status !== "active";
+		if (goalInvalidated) {
 			return {
 				content: [{ type: "text", text: "Goal state changed while the audit was running (cleared, replaced, or budget-limited) — no completion applied." }],
 				details: { goal },
@@ -294,7 +300,7 @@ export default function piGoalAudit(pi: ExtensionAPI) {
 				? await ctx.ui.confirm("Audit interrupted", "Complete without audit?")
 				: false;
 			if (bypass) {
-				const next: GoalState = { ...goalSnapshot, status: "complete", updatedAt: Date.now() };
+				const next: GoalState = { ...goal, status: "complete", updatedAt: Date.now() };
 				persist(pi, ctx, next);
 				emit(pi, "complete", next);
 				return {
@@ -314,7 +320,7 @@ export default function piGoalAudit(pi: ExtensionAPI) {
 		if (auditorResult.error && !auditorResult.output) {
 			auditorFailures++;
 			if (auditorFailures >= 3) {
-				const next: GoalState = { ...goalSnapshot, status: "paused", updatedAt: Date.now() };
+				const next: GoalState = { ...goal, status: "paused", updatedAt: Date.now() };
 				persist(pi, ctx, next);
 				emit(pi, "paused", next);
 				return {
@@ -343,7 +349,7 @@ export default function piGoalAudit(pi: ExtensionAPI) {
 
 		// ── Approved ───────────────────────────────────────────────
 		const now = Date.now();
-		const next: GoalState = { ...goalSnapshot, status: "complete", updatedAt: now };
+		const next: GoalState = { ...goal, status: "complete", updatedAt: now };
 		persist(pi, ctx, next);
 		emit(pi, "complete", next);
 		return {
@@ -358,7 +364,7 @@ export default function piGoalAudit(pi: ExtensionAPI) {
 					"Goal complete.",
 					`\nObjective: ${next.objective}`,
 					`Usage: ${usageStr(next)}`,
-					goalSnapshot.tokenBudget ? `Remaining budget: ${Math.max(0, goalSnapshot.tokenBudget - next.tokensUsed)} tokens` : "",
+					next.tokenBudget ? `Remaining budget: ${Math.max(0, next.tokenBudget - next.tokensUsed)} tokens` : "",
 				].filter(Boolean).join("\n"),
 			}],
 			details: { goal: next },
