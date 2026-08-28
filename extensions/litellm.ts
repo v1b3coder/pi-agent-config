@@ -47,11 +47,13 @@
  * list (`litellm-cache.json` in the agent dir) is authoritative — when it
  * exists it is used as-is with no network round-trip; live discovery (one
  * fast LAN request, 5 s timeout, retried once) runs only when the cache is
- * missing, to create it. Delete the cache file to force a refresh.
+ * missing, to create it. Delete the cache file to force a refresh — or run
+ * /litellm-refresh, which invalidates the cache and re-runs discovery
+ * through the exact same path.
  * If a Claude route is ever added through this proxy, add the anthropic
  * compat flag back.
  */
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { getModels, getProviders } from "@earendil-works/pi-ai/compat";
 import { getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -322,27 +324,57 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     process.env[ENV_MAX_VLLM_OUTPUT_TOKENS],
     DEFAULT_VLLM_MAX_OUTPUT_TOKENS,
   );
-  let models: LmModel[] = [];
-  const cached = readModelCache(root, vllmMaxOutputTokens);
-  if (cached) {
-    models = cached;
-  } else {
-    try {
-      models = await discoverModels(root, key, vllmMaxOutputTokens);
-      writeModelCache(root, vllmMaxOutputTokens, models);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      process.stderr.write(
-        `litellm: model discovery failed (${message}) and no cached model list exists; provider registered without models — run /reload once the proxy is reachable.\n`,
-      );
-    }
+  /** Sole model-load path, shared by startup and /litellm-refresh: serve the
+   *  disk cache when present (no network round-trip), otherwise run live
+   *  discovery and persist the result. Throws only when discovery fails. */
+  async function loadModels(): Promise<LmModel[]> {
+    const cached = readModelCache(root, vllmMaxOutputTokens);
+    if (cached) return cached;
+    const discovered = await discoverModels(root, key, vllmMaxOutputTokens);
+    writeModelCache(root, vllmMaxOutputTokens, discovered);
+    return discovered;
   }
 
-  pi.registerProvider(PROVIDER, {
-    name: "LiteLLM",
-    baseUrl: `${root}/v1`,
-    apiKey: `$${ENV_API_KEY}`, // pi resolves this per request; /login + --api-key work natively
-    api: "openai-completions",
-    models,
+  /** Register (or, after a refresh, re-register) the provider. After the
+   *  initial load phase pi applies this immediately — no /reload needed. */
+  const register = (models: LmModel[]): void => {
+    pi.registerProvider(PROVIDER, {
+      name: "LiteLLM",
+      baseUrl: `${root}/v1`,
+      apiKey: `$${ENV_API_KEY}`, // pi resolves this per request; /login + --api-key work natively
+      api: "openai-completions",
+      models,
+    });
+  };
+
+  let models: LmModel[] = [];
+  try {
+    models = await loadModels();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(
+      `litellm: model discovery failed (${message}) and no cached model list exists; provider registered without models — run /reload once the proxy is reachable.\n`,
+    );
+  }
+  register(models);
+
+  pi.registerCommand("litellm-refresh", {
+    description: "Invalidate the cached LiteLLM model list and reload it from the proxy",
+    handler: async (_args, ctx) => {
+      try {
+        // Deleting the cache makes loadModels() take the live discovery path,
+        // exactly as if the cache had never been written.
+        rmSync(join(getAgentDir(), CACHE_FILE), { force: true });
+        const fresh = await loadModels();
+        register(fresh);
+        ctx.ui.notify(`litellm: cache invalidated, reloaded ${fresh.length} model(s) from ${root}`, "info");
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        ctx.ui.notify(
+          `litellm: refresh failed (${message}); cache left invalidated — retry /litellm-refresh once the proxy is reachable`,
+          "error",
+        );
+      }
+    },
   });
 }
