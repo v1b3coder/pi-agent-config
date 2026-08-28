@@ -6,8 +6,9 @@
 // Temp names were used during development to coexist with installed pi-goal-x.
 // ────────────────────────────────────────────────────────────────────────────
 
-import { defineTool, createAgentSession, createExtensionRuntime, SessionManager, SettingsManager, type ExtensionAPI, type ExtensionContext, type Theme, type ResourceLoader } from "@earendil-works/pi-coding-agent";
+import { defineTool, createAgentSession, DefaultResourceLoader, getAgentDir, ModelRuntime, SessionManager, SettingsManager, type ExtensionAPI, type ExtensionContext, type Theme, type ResourceLoader } from "@earendil-works/pi-coding-agent";
 import { Text, matchesKey } from "@earendil-works/pi-tui";
+import { join } from "node:path";
 import { Type } from "@earendil-works/pi-ai";
 
 // ── Constants ────────────────────────────────────────────────────────────
@@ -87,28 +88,16 @@ function queueCont(pi: ExtensionAPI, state: GoalState) {
 
 // ── Auditor ──────────────────────────────────────────────────────────────
 
-function makeAuditorLoader(): ResourceLoader {
-	return {
-		getExtensions: () => ({ extensions: [], errors: [], runtime: createExtensionRuntime() }),
-		getSkills: () => ({ skills: [], diagnostics: [] }),
-		getPrompts: () => ({ prompts: [], diagnostics: [] }),
-		getThemes: () => ({ themes: [], diagnostics: [] }),
-		getAgentsFiles: () => ({ agentsFiles: [] }),
-		getSystemPrompt: () => [
-			"You are a read-only completion auditor running in an isolated pi agent session.",
-			"Inspect the workspace and decide whether the claimed goal completion is genuinely satisfied.",
-			"Never modify files.",
-			"Use read, grep, find, ls, and bash to inspect real artifacts.",
-			"",
-			'End your report with exactly one of:',
-			"<approved/>",
-			"<disapproved/>",
-		].join("\n"),
-		getAppendSystemPrompt: () => [],
-		extendResources: () => {},
-		reload: async () => {},
-	};
-}
+const AUDITOR_PROMPT = [
+	"You are a read-only completion auditor running in an isolated pi agent session.",
+	"Inspect the workspace and decide whether the claimed goal completion is genuinely satisfied.",
+	"Never modify files.",
+	"Use read, grep, find, ls, and bash to inspect real artifacts.",
+	"",
+	'End your report with exactly one of:',
+	"<approved/>",
+	"<disapproved/>",
+].join("\n");
 
 
 
@@ -123,13 +112,48 @@ async function runAuditor(ctx: ExtensionContext, state: GoalState, claim: string
 	};
 
 	try {
+		// Load global extensions first so extension providers (e.g. litellm) queue
+		// registrations, then pre-apply them to a canonical ModelRuntime. Must be
+		// passed explicitly: the new SDK ignores unknown options like modelRegistry,
+		// and its default runtime (built from agentDir/auth.json) has no extension
+		// providers — ctx.model (litellm/*) would fail with "No API key found".
+		const agentDir = getAgentDir();
+		const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false } });
+		const extLoader = new DefaultResourceLoader({ cwd: ctx.cwd, agentDir, settingsManager });
+		await extLoader.reload();
+		const extResult = extLoader.getExtensions();
+		const modelRuntime = await ModelRuntime.create({
+			authPath: join(agentDir, "auth.json"),
+			modelsPath: join(agentDir, "models.json"),
+		});
+		for (const { name, config } of extResult.runtime.pendingProviderRegistrations) {
+			modelRuntime.registerProvider(name, config);
+		}
+		extResult.runtime.pendingProviderRegistrations = [];
+
+		// Delegate extension bindings to the real load result; keep the auditor's
+		// clean skills/prompts/system prompt.
+		const auditorLoader: ResourceLoader = {
+			getExtensions: () => extResult,
+			getSkills: () => ({ skills: [], diagnostics: [] }),
+			getPrompts: () => ({ prompts: [], diagnostics: [] }),
+			getThemes: () => ({ themes: [], diagnostics: [] }),
+			getAgentsFiles: () => ({ agentsFiles: [] }),
+			getSystemPrompt: () => AUDITOR_PROMPT,
+			getSystemPromptSource: () => undefined,
+			getAppendSystemPrompt: () => [],
+			getAppendSystemPromptSources: () => [],
+			extendResources: () => {},
+			reload: async () => {},
+		};
+
 		const { session } = await createAgentSession({
 			cwd: ctx.cwd,
 			model: ctx.model,
-			modelRegistry: ctx.modelRegistry,
-			resourceLoader: makeAuditorLoader(),
+			modelRuntime,
+			resourceLoader: auditorLoader,
 			sessionManager: SessionManager.inMemory(ctx.cwd),
-			settingsManager: SettingsManager.inMemory({ compaction: { enabled: false } }),
+			settingsManager,
 			tools: ["read", "grep", "find", "ls", "bash"],
 		});
 
