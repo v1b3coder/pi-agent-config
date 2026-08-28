@@ -1,7 +1,7 @@
 {
   "lastChangelogVersion": "0.84.2",
   "defaultProvider": "litellm",
-  "defaultModel": "zai-org/GLM-5.3-Flash",
+  "defaultModel": "deepseek-ai/DeepSeek-V4-Flash",
   "compaction": {
     "enabled": true,
     "reserveTokens": 40960,
