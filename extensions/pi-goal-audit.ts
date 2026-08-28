@@ -6,10 +6,10 @@
 // Temp names were used during development to coexist with installed pi-goal-x.
 // ────────────────────────────────────────────────────────────────────────────
 
-import { defineTool, createAgentSession, DefaultResourceLoader, getAgentDir, ModelRuntime, SessionManager, SettingsManager, type ExtensionAPI, type ExtensionContext, type Theme, type ResourceLoader } from "@earendil-works/pi-coding-agent";
+import { defineTool, createAgentSession, createExtensionRuntime, SessionManager, SettingsManager, ModelRuntime, getAgentDir, type ExtensionAPI, type ExtensionContext, type Theme, type ResourceLoader } from "@earendil-works/pi-coding-agent";
 import { Text, matchesKey } from "@earendil-works/pi-tui";
-import { join } from "node:path";
 import { Type } from "@earendil-works/pi-ai";
+import { join } from "node:path";
 
 // ── Constants ────────────────────────────────────────────────────────────
 
@@ -88,16 +88,28 @@ function queueCont(pi: ExtensionAPI, state: GoalState) {
 
 // ── Auditor ──────────────────────────────────────────────────────────────
 
-const AUDITOR_PROMPT = [
-	"You are a read-only completion auditor running in an isolated pi agent session.",
-	"Inspect the workspace and decide whether the claimed goal completion is genuinely satisfied.",
-	"Never modify files.",
-	"Use read, grep, find, ls, and bash to inspect real artifacts.",
-	"",
-	'End your report with exactly one of:',
-	"<approved/>",
-	"<disapproved/>",
-].join("\n");
+function makeAuditorLoader(): ResourceLoader {
+	return {
+		getExtensions: () => ({ extensions: [], errors: [], runtime: createExtensionRuntime() }),
+		getSkills: () => ({ skills: [], diagnostics: [] }),
+		getPrompts: () => ({ prompts: [], diagnostics: [] }),
+		getThemes: () => ({ themes: [], diagnostics: [] }),
+		getAgentsFiles: () => ({ agentsFiles: [] }),
+		getSystemPrompt: () => [
+			"You are a read-only completion auditor running in an isolated pi agent session.",
+			"Inspect the workspace and decide whether the claimed goal completion is genuinely satisfied.",
+			"Never modify files.",
+			"Use read, grep, find, ls, and bash to inspect real artifacts.",
+			"",
+			'End your report with exactly one of:',
+			"<approved/>",
+			"<disapproved/>",
+		].join("\n"),
+		getAppendSystemPrompt: () => [],
+		extendResources: () => {},
+		reload: async () => {},
+	};
+}
 
 
 
@@ -112,48 +124,29 @@ async function runAuditor(ctx: ExtensionContext, state: GoalState, claim: string
 	};
 
 	try {
-		// Load global extensions first so extension providers (e.g. litellm) queue
-		// registrations, then pre-apply them to a canonical ModelRuntime. Must be
-		// passed explicitly: the new SDK ignores unknown options like modelRegistry,
-		// and its default runtime (built from agentDir/auth.json) has no extension
-		// providers — ctx.model (litellm/*) would fail with "No API key found".
+		// Minimal API migration (new SDK): createAgentSession no longer accepts
+		// `modelRegistry` (silently ignored), so a default runtime would lack the
+		// extension-registered providers (e.g. litellm) and auth would fail with
+		// "No API key found". Build the canonical runtime from the agent dir and
+		// re-register the parent session's extension providers on it — the same
+		// thing the parent's ExtensionRunner does. Everything else is unchanged.
 		const agentDir = getAgentDir();
-		const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false } });
-		const extLoader = new DefaultResourceLoader({ cwd: ctx.cwd, agentDir, settingsManager });
-		await extLoader.reload();
-		const extResult = extLoader.getExtensions();
 		const modelRuntime = await ModelRuntime.create({
 			authPath: join(agentDir, "auth.json"),
 			modelsPath: join(agentDir, "models.json"),
 		});
-		for (const { name, config } of extResult.runtime.pendingProviderRegistrations) {
-			modelRuntime.registerProvider(name, config);
+		for (const id of ctx.modelRegistry.getRegisteredProviderIds()) {
+			const config = ctx.modelRegistry.getRegisteredProviderConfig(id);
+			if (config) modelRuntime.registerProvider(id, config);
 		}
-		extResult.runtime.pendingProviderRegistrations = [];
-
-		// Delegate extension bindings to the real load result; keep the auditor's
-		// clean skills/prompts/system prompt.
-		const auditorLoader: ResourceLoader = {
-			getExtensions: () => extResult,
-			getSkills: () => ({ skills: [], diagnostics: [] }),
-			getPrompts: () => ({ prompts: [], diagnostics: [] }),
-			getThemes: () => ({ themes: [], diagnostics: [] }),
-			getAgentsFiles: () => ({ agentsFiles: [] }),
-			getSystemPrompt: () => AUDITOR_PROMPT,
-			getSystemPromptSource: () => undefined,
-			getAppendSystemPrompt: () => [],
-			getAppendSystemPromptSources: () => [],
-			extendResources: () => {},
-			reload: async () => {},
-		};
 
 		const { session } = await createAgentSession({
 			cwd: ctx.cwd,
 			model: ctx.model,
 			modelRuntime,
-			resourceLoader: auditorLoader,
+			resourceLoader: makeAuditorLoader(),
 			sessionManager: SessionManager.inMemory(ctx.cwd),
-			settingsManager,
+			settingsManager: SettingsManager.inMemory({ compaction: { enabled: false } }),
 			tools: ["read", "grep", "find", "ls", "bash"],
 		});
 
@@ -243,134 +236,6 @@ export default function piGoalAudit(pi: ExtensionAPI) {
 		},
 	}));
 
-	// ── Completion flow (shared by update_goal tool and /goal complete) ─
-	let auditorFailures = 0;
-
-	async function runCompletionFlow(ctx: ExtensionContext, completionSummary: string): Promise<{ content: Array<{ type: string; text: string }>; details?: unknown; isError?: boolean }> {
-		if (!goal) {
-			return { content: [{ type: "text", text: "No goal is set." }], isError: true };
-		}
-		if (goal.status !== "active") {
-			return { content: [{ type: "text", text: `Goal is ${goal.status}; completion does not apply.` }], isError: true };
-		}
-
-		// Snapshot: detects goal invalidation during the audit (cleared /
-		// replaced / no longer active). Token-accounting updates from
-		// turn_end reassign `goal` but keep id+status — not a change.
-		const goalSnapshot = goal;
-
-		// ── Audit phase ────────────────────────────────────────────────
-		ctx.ui.notify("Auditor: inspecting workspace for completion evidence...", "info");
-
-		const abortController = new AbortController();
-		let unsubTerminal: (() => void) | null = null;
-		if (ctx.hasUI && ctx.ui.onTerminalInput) {
-			unsubTerminal = ctx.ui.onTerminalInput((data) => {
-				if (matchesKey(data, "escape")) {
-					abortController.abort();
-					return { consume: true };
-				}
-				return undefined;
-			});
-		}
-
-		let auditorResult: { approved: boolean; output: string; error?: string };
-		try {
-			auditorResult = await runAuditor(ctx, goalSnapshot, completionSummary, abortController.signal);
-		} finally {
-			unsubTerminal?.();
-		}
-
-		// ── Goal invalidated during the audit → never persist ───
-		// NOTE: turn_end token accounting reassigns `goal` (a NEW object)
-		// on every turn — that is NOT a state change. Only a clear, a
-		// replaced objective (different id), or a status transition away
-		// from active invalidate the audit result.
-		const goalInvalidated = !goal || goal.id !== goalSnapshot.id || goal.status !== "active";
-		if (goalInvalidated) {
-			return {
-				content: [{ type: "text", text: "Goal state changed while the audit was running (cleared, replaced, or budget-limited) — no completion applied." }],
-				details: { goal },
-			};
-		}
-
-		// ── Handle abort (Esc pressed during audit) ────────────────
-		if (abortController.signal.aborted) {
-			const bypass = ctx.hasUI
-				? await ctx.ui.confirm("Audit interrupted", "Complete without audit?")
-				: false;
-			if (bypass) {
-				const next: GoalState = { ...goal, status: "complete", updatedAt: Date.now() };
-				persist(pi, ctx, next);
-				emit(pi, "complete", next);
-				return {
-					content: [{ type: "text", text: `Goal marked complete (audit bypassed via Esc).\n\nObjective: ${next.objective}\nUsage: ${usageStr(next)}` }],
-					details: { goal: next },
-				};
-			}
-			return {
-				content: [{ type: "text", text: "Goal audit aborted. Goal remains active." }],
-				details: { goal },
-			};
-		}
-
-		// ── Handle auditor error (infra failure, not a verdict) ──────
-		// Without this, every failure leaves the goal active and the goal runner
-		// auto-continues → endless retry loop. Pause after 3 consecutive errors.
-		if (auditorResult.error && !auditorResult.output) {
-			auditorFailures++;
-			if (auditorFailures >= 3) {
-				const next: GoalState = { ...goal, status: "paused", updatedAt: Date.now() };
-				persist(pi, ctx, next);
-				emit(pi, "paused", next);
-				return {
-					content: [{ type: "text", text: `Auditor failed ${auditorFailures} consecutive times (${auditorResult.error}).\n\nGoal paused to stop the retry loop. Fix the auditor (e.g. provider auth) and run /${COMMAND_NAME} resume to retry.` }],
-					details: { goal: next },
-					isError: true,
-				};
-			}
-			return {
-				content: [{ type: "text", text: `Auditor error (attempt ${auditorFailures}/3): ${auditorResult.error}. Goal remains active.` }],
-				details: { goal },
-				isError: true,
-			};
-		}
-
-		// The auditor produced a real verdict — reset the failure counter.
-		auditorFailures = 0;
-
-		// ── Handle rejection ───────────────────────────────────────
-		if (!auditorResult.approved) {
-			return {
-				content: [{ type: "text", text: `Goal audit rejected by independent auditor.\n\n${auditorResult.output}\n\nGoal remains active. Address the auditor's findings and retry.` }],
-				details: { goal },
-			};
-		}
-
-		// ── Approved ───────────────────────────────────────────────
-		const now = Date.now();
-		const next: GoalState = { ...goal, status: "complete", updatedAt: now };
-		persist(pi, ctx, next);
-		emit(pi, "complete", next);
-		return {
-			content: [{
-				type: "text",
-				text: [
-					"Goal audit approved.",
-					"",
-					"Auditor report:",
-					auditorResult.output,
-					"",
-					"Goal complete.",
-					`\nObjective: ${next.objective}`,
-					`Usage: ${usageStr(next)}`,
-					next.tokenBudget ? `Remaining budget: ${Math.max(0, next.tokenBudget - next.tokensUsed)} tokens` : "",
-				].filter(Boolean).join("\n"),
-			}],
-			details: { goal: next },
-		};
-	}
-
 	// ── update_goal tool ────────────────────────────────────────────────
 	pi.registerTool(defineTool({
 		name: "update_goal",
@@ -392,15 +257,104 @@ export default function piGoalAudit(pi: ExtensionAPI) {
 			if (effectiveStatus !== "complete") {
 				return { content: [{ type: "text", text: "update_goal only accepts status=complete." }], isError: true };
 			}
-			return runCompletionFlow(ctx, params.completionSummary?.trim() ?? "");
+			if (!goal) {
+				return { content: [{ type: "text", text: "No goal is set." }], isError: true };
+			}
+			if (goal.status !== "active") {
+				return { content: [{ type: "text", text: `Goal is ${goal.status}; update_goal does not apply.` }], isError: true };
+			}
+
+			const completionSummary = params.completionSummary?.trim() ?? "";
+
+			// ── Audit phase ────────────────────────────────────────────────
+			ctx.ui.notify("Auditor: inspecting workspace for completion evidence...", "info");
+
+			const abortController = new AbortController();
+			let unsubTerminal: (() => void) | null = null;
+			if (ctx.hasUI && ctx.ui.onTerminalInput) {
+				unsubTerminal = ctx.ui.onTerminalInput((data) => {
+					if (matchesKey(data, "escape")) {
+						abortController.abort();
+						return { consume: true };
+					}
+					return undefined;
+				});
+			}
+
+			let auditorResult: { approved: boolean; output: string; error?: string };
+			try {
+				auditorResult = await runAuditor(ctx, goal, completionSummary, abortController.signal);
+			} finally {
+				unsubTerminal?.();
+			}
+
+			// ── Handle abort (Esc pressed during audit) ────────────────────
+			if (abortController.signal.aborted) {
+				const bypass = ctx.hasUI
+					? await ctx.ui.confirm("Audit interrupted", "Complete without audit?")
+					: false;
+				if (bypass) {
+					const next: GoalState = { ...goal, status: "complete", updatedAt: Date.now() };
+					persist(pi, ctx, next);
+					emit(pi, "complete", next);
+					return {
+						content: [{ type: "text", text: `Goal marked complete (audit bypassed via Esc).\n\nObjective: ${goal.objective}\nUsage: ${usageStr(next)}` }],
+						details: { goal: next },
+					};
+				}
+				return {
+					content: [{ type: "text", text: "Goal audit aborted. Goal remains active." }],
+					details: { goal },
+				};
+			}
+
+			// ── Handle auditor error ───────────────────────────────────────
+			if (auditorResult.error && !auditorResult.output) {
+				return {
+					content: [{ type: "text", text: `Auditor error: ${auditorResult.error}. Goal remains active.` }],
+					details: { goal },
+					isError: true,
+				};
+			}
+
+			// ── Handle rejection ───────────────────────────────────────────
+			if (!auditorResult.approved) {
+				return {
+					content: [{ type: "text", text: `Goal audit rejected by independent auditor.\n\n${auditorResult.output}\n\nGoal remains active. Address the auditor's findings and retry.` }],
+					details: { goal },
+				};
+			}
+
+			// ── Approved ───────────────────────────────────────────────────
+			const now = Date.now();
+			const next: GoalState = { ...goal, status: "complete", updatedAt: now };
+			persist(pi, ctx, next);
+			emit(pi, "complete", next);
+			return {
+				content: [{
+					type: "text",
+					text: [
+						"Goal audit approved.",
+						"",
+						"Auditor report:",
+						auditorResult.output,
+						"",
+						"Goal complete.",
+						`\nObjective: ${goal.objective}`,
+						`Usage: ${usageStr(next)}`,
+						goal.tokenBudget ? `Remaining budget: ${Math.max(0, goal.tokenBudget - next.tokensUsed)} tokens` : "",
+					].filter(Boolean).join("\n"),
+				}],
+				details: { goal: next },
+			};
 		},
 	}));
 
 	// ── /goal command ─────────────────────────────────────────────────────
 	pi.registerCommand(COMMAND_NAME, {
-		description: "Set, view, pause, resume, complete, or clear a long-running goal",
+		description: "Set, view, pause, resume, or clear a long-running goal",
 		getArgumentCompletions: (prefix) => {
-			const values = ["pause", "resume", "complete", "clear", "status", "statusbar", "statusbar on", "statusbar off"];
+			const values = ["pause", "resume", "clear", "status", "statusbar", "statusbar on", "statusbar off"];
 			const filtered = values.filter((v) => v.startsWith(prefix));
 			return filtered.length ? filtered.map((v) => ({ value: v, label: v })) : null;
 		},
@@ -419,19 +373,6 @@ export default function piGoalAudit(pi: ExtensionAPI) {
 				statusBarEnabled = value === "on" ? true : value === "off" ? false : !statusBarEnabled;
 				saveSettings(pi, ctx);
 				ctx.ui.notify(`Goal status bar ${statusBarEnabled ? "enabled" : "disabled"}.`, "info");
-				return;
-			}
-
-			if (trimmed === "complete") {
-				// Completes the CURRENT goal via the auditor flow - never treat
-				// "complete" as a new objective (that created bogus goals).
-				if (!goal || goal.status !== "active") {
-					ctx.ui.notify("No active goal to complete.", "warning");
-					return;
-				}
-				const result = await runCompletionFlow(ctx, "");
-				const text = result.content?.[0]?.text ?? "";
-				ctx.ui.notify(text.split("\n")[0] ?? "", result.isError ? "warning" : "info");
 				return;
 			}
 
