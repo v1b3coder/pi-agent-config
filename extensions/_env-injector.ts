@@ -32,7 +32,7 @@
 
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { hasTrustRequiringProjectResources, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 // ─── Variable expansion ──────────────────────────────────────────────────────
 
@@ -193,6 +193,12 @@ function loadDotenvFile(filePath: string): Record<string, string> {
  * .env.local.
  */
 function isProjectTrusted(cwd: string, home: string): boolean {
+  // Mirrors pi's resolveProjectTrusted(): projects without trust-requiring
+  // resources are implicitly trusted; otherwise a saved trust.json decision
+  // wins, falling back to defaultProjectTrust ("always" trusts). Never
+  // prompts. Reading the files is the only option here — the factory runs
+  // before project trust is resolved.
+  if (!hasTrustRequiringProjectResources(cwd)) return true;
   try {
     const trustData = JSON.parse(readFileSync(join(home, ".pi", "agent", "trust.json"), "utf-8")) as Record<string, boolean>;
     if (typeof trustData[cwd] === "boolean") return trustData[cwd];
