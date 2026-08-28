@@ -243,6 +243,128 @@ export default function piGoalAudit(pi: ExtensionAPI) {
 		},
 	}));
 
+	// ── Completion flow (shared by update_goal tool and /goal complete) ─
+	let auditorFailures = 0;
+
+	async function runCompletionFlow(ctx: ExtensionContext, completionSummary: string): Promise<{ content: Array<{ type: string; text: string }>; details?: unknown; isError?: boolean }> {
+		if (!goal) {
+			return { content: [{ type: "text", text: "No goal is set." }], isError: true };
+		}
+		if (goal.status !== "active") {
+			return { content: [{ type: "text", text: `Goal is ${goal.status}; completion does not apply.` }], isError: true };
+		}
+
+		// Snapshot: the goal must not change while the audit is running (e.g.
+		// /goal clear mid-audit). All decisions below use the snapshot.
+		const goalSnapshot = goal;
+
+		// ── Audit phase ────────────────────────────────────────────────
+		ctx.ui.notify("Auditor: inspecting workspace for completion evidence...", "info");
+
+		const abortController = new AbortController();
+		let unsubTerminal: (() => void) | null = null;
+		if (ctx.hasUI && ctx.ui.onTerminalInput) {
+			unsubTerminal = ctx.ui.onTerminalInput((data) => {
+				if (matchesKey(data, "escape")) {
+					abortController.abort();
+					return { consume: true };
+				}
+				return undefined;
+			});
+		}
+
+		let auditorResult: { approved: boolean; output: string; error?: string };
+		try {
+			auditorResult = await runAuditor(ctx, goalSnapshot, completionSummary, abortController.signal);
+		} finally {
+			unsubTerminal?.();
+		}
+
+		// ── Goal state changed during the audit → never persist ───────
+		if (goal !== goalSnapshot) {
+			return {
+				content: [{ type: "text", text: "Goal state changed while the audit was running (cleared, replaced, or budget-limited) — no completion applied." }],
+				details: { goal },
+			};
+		}
+
+		// ── Handle abort (Esc pressed during audit) ────────────────
+		if (abortController.signal.aborted) {
+			const bypass = ctx.hasUI
+				? await ctx.ui.confirm("Audit interrupted", "Complete without audit?")
+				: false;
+			if (bypass) {
+				const next: GoalState = { ...goalSnapshot, status: "complete", updatedAt: Date.now() };
+				persist(pi, ctx, next);
+				emit(pi, "complete", next);
+				return {
+					content: [{ type: "text", text: `Goal marked complete (audit bypassed via Esc).\n\nObjective: ${next.objective}\nUsage: ${usageStr(next)}` }],
+					details: { goal: next },
+				};
+			}
+			return {
+				content: [{ type: "text", text: "Goal audit aborted. Goal remains active." }],
+				details: { goal },
+			};
+		}
+
+		// ── Handle auditor error (infra failure, not a verdict) ──────
+		// Without this, every failure leaves the goal active and the goal runner
+		// auto-continues → endless retry loop. Pause after 3 consecutive errors.
+		if (auditorResult.error && !auditorResult.output) {
+			auditorFailures++;
+			if (auditorFailures >= 3) {
+				const next: GoalState = { ...goalSnapshot, status: "paused", updatedAt: Date.now() };
+				persist(pi, ctx, next);
+				emit(pi, "paused", next);
+				return {
+					content: [{ type: "text", text: `Auditor failed ${auditorFailures} consecutive times (${auditorResult.error}).\n\nGoal paused to stop the retry loop. Fix the auditor (e.g. provider auth) and run /${COMMAND_NAME} resume to retry.` }],
+					details: { goal: next },
+					isError: true,
+				};
+			}
+			return {
+				content: [{ type: "text", text: `Auditor error (attempt ${auditorFailures}/3): ${auditorResult.error}. Goal remains active.` }],
+				details: { goal },
+				isError: true,
+			};
+		}
+
+		// The auditor produced a real verdict — reset the failure counter.
+		auditorFailures = 0;
+
+		// ── Handle rejection ───────────────────────────────────────
+		if (!auditorResult.approved) {
+			return {
+				content: [{ type: "text", text: `Goal audit rejected by independent auditor.\n\n${auditorResult.output}\n\nGoal remains active. Address the auditor's findings and retry.` }],
+				details: { goal },
+			};
+		}
+
+		// ── Approved ───────────────────────────────────────────────
+		const now = Date.now();
+		const next: GoalState = { ...goalSnapshot, status: "complete", updatedAt: now };
+		persist(pi, ctx, next);
+		emit(pi, "complete", next);
+		return {
+			content: [{
+				type: "text",
+				text: [
+					"Goal audit approved.",
+					"",
+					"Auditor report:",
+					auditorResult.output,
+					"",
+					"Goal complete.",
+					`\nObjective: ${next.objective}`,
+					`Usage: ${usageStr(next)}`,
+					goalSnapshot.tokenBudget ? `Remaining budget: ${Math.max(0, goalSnapshot.tokenBudget - next.tokensUsed)} tokens` : "",
+				].filter(Boolean).join("\n"),
+			}],
+			details: { goal: next },
+		};
+	}
+
 	// ── update_goal tool ────────────────────────────────────────────────
 	pi.registerTool(defineTool({
 		name: "update_goal",
@@ -271,6 +393,10 @@ export default function piGoalAudit(pi: ExtensionAPI) {
 				return { content: [{ type: "text", text: `Goal is ${goal.status}; update_goal does not apply.` }], isError: true };
 			}
 
+			// Snapshot: the goal must not change while the audit runs (e.g.
+			// /goal clear mid-audit). Decisions below use the snapshot.
+			const goalSnapshot = goal;
+
 			const completionSummary = params.completionSummary?.trim() ?? "";
 
 			// ── Audit phase ────────────────────────────────────────────────
@@ -295,13 +421,21 @@ export default function piGoalAudit(pi: ExtensionAPI) {
 				unsubTerminal?.();
 			}
 
+			// ── Goal state changed during the audit: never persist ───
+			if (goal !== goalSnapshot) {
+				return {
+					content: [{ type: "text", text: "Goal state changed while the audit was running (cleared, replaced, or budget-limited) - no completion applied." }],
+					details: { goal },
+				};
+			}
+
 			// ── Handle abort (Esc pressed during audit) ────────────────────
 			if (abortController.signal.aborted) {
 				const bypass = ctx.hasUI
 					? await ctx.ui.confirm("Audit interrupted", "Complete without audit?")
 					: false;
 				if (bypass) {
-					const next: GoalState = { ...goal, status: "complete", updatedAt: Date.now() };
+					const next: GoalState = { ...goalSnapshot, status: "complete", updatedAt: Date.now() };
 					persist(pi, ctx, next);
 					emit(pi, "complete", next);
 					return {
@@ -315,14 +449,30 @@ export default function piGoalAudit(pi: ExtensionAPI) {
 				};
 			}
 
-			// ── Handle auditor error ───────────────────────────────────────
+			// ── Handle auditor error (infra failure, not a verdict) ────
+			// Without this, every failure leaves the goal active and the goal
+			// runner auto-continues: endless retry loop. Pause after 3.
 			if (auditorResult.error && !auditorResult.output) {
+				auditorFailures++;
+				if (auditorFailures >= 3) {
+					const next: GoalState = { ...goalSnapshot, status: "paused", updatedAt: Date.now() };
+					persist(pi, ctx, next);
+					emit(pi, "paused", next);
+					return {
+						content: [{ type: "text", text: `Auditor failed ${auditorFailures} consecutive times (${auditorResult.error}).` + "\n\nGoal paused to stop the retry loop. Fix the auditor (e.g. provider auth) and run /" + COMMAND_NAME + " resume to retry." }],
+						details: { goal: next },
+						isError: true,
+					};
+				}
 				return {
-					content: [{ type: "text", text: `Auditor error: ${auditorResult.error}. Goal remains active.` }],
+					content: [{ type: "text", text: `Auditor error (attempt ${auditorFailures}/3): ${auditorResult.error}. Goal remains active.` }],
 					details: { goal },
 					isError: true,
 				};
 			}
+
+			// The auditor produced a real verdict - reset the failure counter.
+			auditorFailures = 0;
 
 			// ── Handle rejection ───────────────────────────────────────────
 			if (!auditorResult.approved) {
@@ -334,7 +484,7 @@ export default function piGoalAudit(pi: ExtensionAPI) {
 
 			// ── Approved ───────────────────────────────────────────────────
 			const now = Date.now();
-			const next: GoalState = { ...goal, status: "complete", updatedAt: now };
+			const next: GoalState = { ...goalSnapshot, status: "complete", updatedAt: now };
 			persist(pi, ctx, next);
 			emit(pi, "complete", next);
 			return {
@@ -347,9 +497,9 @@ export default function piGoalAudit(pi: ExtensionAPI) {
 						auditorResult.output,
 						"",
 						"Goal complete.",
-						`\nObjective: ${goal.objective}`,
+						`\nObjective: ${next.objective}`,
 						`Usage: ${usageStr(next)}`,
-						goal.tokenBudget ? `Remaining budget: ${Math.max(0, goal.tokenBudget - next.tokensUsed)} tokens` : "",
+						goalSnapshot.tokenBudget ? `Remaining budget: ${Math.max(0, goalSnapshot.tokenBudget - next.tokensUsed)} tokens` : "",
 					].filter(Boolean).join("\n"),
 				}],
 				details: { goal: next },
@@ -359,9 +509,9 @@ export default function piGoalAudit(pi: ExtensionAPI) {
 
 	// ── /goal command ─────────────────────────────────────────────────────
 	pi.registerCommand(COMMAND_NAME, {
-		description: "Set, view, pause, resume, or clear a long-running goal",
+		description: "Set, view, pause, resume, complete, or clear a long-running goal",
 		getArgumentCompletions: (prefix) => {
-			const values = ["pause", "resume", "clear", "status", "statusbar", "statusbar on", "statusbar off"];
+			const values = ["pause", "resume", "complete", "clear", "status", "statusbar", "statusbar on", "statusbar off"];
 			const filtered = values.filter((v) => v.startsWith(prefix));
 			return filtered.length ? filtered.map((v) => ({ value: v, label: v })) : null;
 		},
@@ -380,6 +530,19 @@ export default function piGoalAudit(pi: ExtensionAPI) {
 				statusBarEnabled = value === "on" ? true : value === "off" ? false : !statusBarEnabled;
 				saveSettings(pi, ctx);
 				ctx.ui.notify(`Goal status bar ${statusBarEnabled ? "enabled" : "disabled"}.`, "info");
+				return;
+			}
+
+			if (trimmed === "complete") {
+				// Completes the CURRENT goal via the auditor flow - never treat
+				// "complete" as a new objective (that created bogus goals).
+				if (!goal || goal.status !== "active") {
+					ctx.ui.notify("No active goal to complete.", "warning");
+					return;
+				}
+				const result = await runCompletionFlow(ctx, "");
+				const text = result.content?.[0]?.text ?? "";
+				ctx.ui.notify(text.split("\n")[0] ?? "", result.isError ? "warning" : "info");
 				return;
 			}
 
