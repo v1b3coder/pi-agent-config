@@ -367,7 +367,13 @@ export default async function (pi: ExtensionAPI): Promise<void> {
         rmSync(join(getAgentDir(), CACHE_FILE), { force: true });
         const fresh = await loadModels();
         register(fresh);
-        ctx.ui.notify(`litellm: cache invalidated, reloaded ${fresh.length} model(s) from ${root}`, "info");
+        // Pi resolves enabledModels → scoped models once at startup; a re-register
+        // updates the live registry but never that list. New models only reach the
+        // picker's default scoped view after a restart.
+        ctx.ui.notify(
+          `litellm: cache invalidated, reloaded ${fresh.length} model(s) from ${root} — restart to apply to the scoped model list (Tab switches picker scope)`,
+          "info",
+        );
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         ctx.ui.notify(
