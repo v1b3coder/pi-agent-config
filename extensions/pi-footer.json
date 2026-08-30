@@ -5,6 +5,21 @@
   "lines": [
     [
       {
+        "id": "event-mq8hz2xk-a3k9p4",
+        "type": "event",
+        "enabled": true,
+        "options": {
+          "raw": false,
+          "hideWhenEmpty": false,
+          "icon": "",
+          "text": "",
+          "fg": "default",
+          "bg": "default",
+          "bold": false,
+          "widgetId": "hostname"
+        }
+      },
+      {
         "id": "cwd-mplnzvrs-cm8989",
         "type": "cwd",
         "enabled": true,
