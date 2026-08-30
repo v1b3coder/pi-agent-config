@@ -9,7 +9,7 @@
         "type": "event",
         "enabled": true,
         "options": {
-          "raw": false,
+          "raw": true,
           "hideWhenEmpty": false,
           "icon": "",
           "text": "",
@@ -204,12 +204,12 @@
       "preset-tools"
     ],
     "knownKeys": [
+      "fusion",
       "mcp",
       "plan-mode",
       "preset",
       "preset-name",
-      "preset-tools",
-      "fusion"
+      "preset-tools"
     ]
   }
 }
