@@ -45,15 +45,31 @@
   "defaultThinkingLevel": "high",
   "enableInstallTelemetry": false,
   "terminal": {
-    "showTerminalProgress": true
+    "showTerminalProgress": true,
+    "clearOnShrink": true
   },
   "transport": "auto",
   "hideThinkingBlock": true,
-  "collapseChangelog": false,
-  "quietStartup": false,
+  "collapseChangelog": true,
+  "quietStartup": true,
   "doubleEscapeAction": "tree",
   "enabledModels": [
     "litellm/**"
   ],
-  "theme": "dark"
+  "theme": "dark",
+  "showHardwareCursor": true,
+  "outputPad": 0,
+  "steeringMode": "all",
+  "followUpMode": "all",
+  "markdown": {
+    "mermaid": "streaming"
+  },
+  "showCacheMissNotices": true,
+  "treeFilterMode": "default",
+  "warnings": {
+    "anthropicExtraUsage": true
+  },
+  "tuiMode": "regular",
+  "fullscreenExitOutput": "transcript",
+  "fullscreenScrollbar": "auto"
 }
