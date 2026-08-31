@@ -27,10 +27,18 @@ function currentUser(): string {
 }
 
 function emitHostname(pi: ExtensionAPI): void {
-  pi.events.emit("pi-footer:update-widget", {
-    widgetId: WIDGET_ID,
-    value: `${currentUser()}@${os.hostname()}`,
-  });
+  // The captured pi goes stale after session replacement (newSession/fork/
+  // switchSession) or /reload. A stale emit must never escape as an uncaught
+  // exception and kill pi; the replacement instance re-emits on session_start
+  // anyway, so swallowing a stale emit is correct.
+  try {
+    pi.events.emit("pi-footer:update-widget", {
+      widgetId: WIDGET_ID,
+      value: `${currentUser()}@${os.hostname()}`,
+    });
+  } catch {
+    // stale ctx — ignore
+  }
 }
 
 export default function (pi: ExtensionAPI): void {
