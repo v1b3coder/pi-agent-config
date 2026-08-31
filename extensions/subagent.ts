@@ -1,10 +1,13 @@
 import {
+  AssistantMessageComponent,
   createAgentSession,
   DefaultResourceLoader,
   getAgentDir,
+  getMarkdownTheme,
   ModelRuntime,
   SessionManager,
   SettingsManager,
+  ToolExecutionComponent,
 } from "@earendil-works/pi-coding-agent";
 import { keyHint } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
@@ -13,10 +16,42 @@ import { join } from "node:path";
 
 // ── Shared types ───────────────────────────────────────────────────
 
+// AssistantMessage as consumed by the main window's message component
+// (avoids importing the pi-ai type directly)
+type AssistantMsg = NonNullable<
+  ConstructorParameters<typeof AssistantMessageComponent>[0]
+>;
+
+// Result shape accepted by the tool execution component
+// (avoids importing the pi-ai AgentToolResult type directly)
+type ToolResultLike = Parameters<ToolExecutionComponent["updateResult"]>[0];
+
+interface AssistantBlock {
+  kind: "assistant";
+  message: AssistantMsg | undefined;
+  streaming: boolean;
+  version: number;
+}
+
+interface ToolBlock {
+  kind: "tool";
+  toolCallId: string;
+  toolName: string;
+  args: unknown;
+  partial: ToolResultLike | undefined;
+  result: ToolResultLike | undefined;
+  isError: boolean;
+  version: number;
+}
+
+type AgentBlock = AssistantBlock | ToolBlock;
+
 interface AgentState {
   agent: string;
-  output: string;
+  task: string;
   status: "running" | "done" | "error";
+  blocks: AgentBlock[];
+  version: number;
 }
 
 interface RunState {
@@ -43,27 +78,8 @@ import {
   matchesKey,
   Key,
   truncateToWidth,
-  visibleWidth,
-  wrapTextWithAnsi,
   type TUI,
 } from "@earendil-works/pi-tui";
-
-// Strip only layout-breaking ANSI, preserve SGR color/style codes
-function stripLayoutAnsi(s: string): string {
-  return s
-    // Strip CSI sequences that are NOT SGR (final byte != m / 0x6D)
-    .replace(/\x1B\[[0-9;<=>?]*[ -/]*[\x40-\x6C\x6E-\x7E]/g, "")
-    // Strip OSC sequences (e.g. window title)
-    .replace(/\x1B\].*?(?:\x07|\x1B\\)/g, "")
-    // Strip charset selection (ESC ( B, ESC ) B, ESC ( 0, etc.)
-    .replace(/\x1B[()]./g, "")
-    // Strip bracketed paste markers
-    .replace(/\x1B\[?2004[hl]/g, "")
-    // Strip CR and BEL
-    .replace(/\r/g, "").replace(/\x07/g, "")
-    // Strip other control chars except TAB, LF, ESC (needed for color codes)
-    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1A\x1C-\x1F]/g, "");
-}
 
 // ── Left-strip rendering (same pattern as extensions/left-strip-tools.ts) ──
 
@@ -116,145 +132,244 @@ function resultBg(isError: boolean, theme: Theme): BgFn {
   return (s: string) => theme.bg(isError ? "toolErrorBg" : "toolSuccessBg", s);
 }
 
-class SubagentPeek {
-  private agentStates: Map<string, AgentState>;
-  private agentOrder: string[];
-  private selectedIndex = 0;
-  private scrollOffset = 0;
+// ── Full-screen tabbed viewer (Alt+O) ──────────────────────────────
+
+/** Last human-meaningful line of an agent's activity, for the footer widget. */
+function lastSnippet(state: AgentState): string {
+  for (let i = state.blocks.length - 1; i >= 0; i--) {
+    const b = state.blocks[i]!;
+    if (b.kind === "tool") {
+      if (b.result !== undefined) {
+        return `${b.toolName} ${b.isError ? "\u2717" : "\u2713"}`;
+      }
+      return `\u27f3 ${b.toolName}\u2026`;
+    }
+    const content = b.message?.content;
+    if (!content) continue;
+    for (let j = content.length - 1; j >= 0; j--) {
+      const c = content[j] as { type: string; text?: string; thinking?: string };
+      const text = c.type === "text" ? c.text : c.type === "thinking" ? c.thinking : undefined;
+      if (text) {
+        const line = text.trim().split("\n").pop() ?? "";
+        if (line) return line;
+      }
+    }
+  }
+  return "working...";
+}
+
+/** Cached rendered lines for one transcript block. */
+interface BlockEntry {
+  component: AssistantMessageComponent | ToolExecutionComponent;
+  renderedVersion: number;
+  width: number;
+  lines: string[];
+}
+
+/**
+ * Full-screen overlay: tab bar on top, the selected agent's transcript
+ * rendered with the main window's components (markdown, tool blocks),
+ * windowed to the terminal height, following live output by default.
+ */
+class AgentViewer {
+  private states: Map<string, AgentState>;
+  private order: string[];
   private tui: TUI;
-  private visualLines: string[] = [];
+  private cwd: string;
+  private theme: Theme;
+  private selectedIndex = 0;
+  /** Absolute first visible line of the body; null = follow the end. */
+  private anchor: number | null = null;
+  private blockEntries = new Map<string, Map<number, BlockEntry>>();
+  private lastBody: string[] = [];
+  private lastBodyKey = "";
   private onClose: () => void;
 
   constructor(
-    agentStates: Map<string, AgentState>,
-    agentOrder: string[],
+    states: Map<string, AgentState>,
+    order: string[],
     tui: TUI,
+    cwd: string,
+    theme: Theme,
     onClose: () => void,
   ) {
-    this.agentStates = agentStates;
-    this.agentOrder = agentOrder;
+    this.states = states;
+    this.order = order;
     this.tui = tui;
+    this.cwd = cwd;
+    this.theme = theme;
     this.onClose = onClose;
   }
 
-  /** Content rows available for output, derived from the terminal size. */
-  private visibleLines(): number {
+  private viewportHeight(): number {
     const rows = this.tui.terminal?.rows ?? 30;
-    return Math.max(6, Math.min(rows - 8, Math.floor(rows * 0.9) - 4));
+    return Math.max(3, rows - 2); // tab bar + help line
+  }
+
+  private currentLength(): number {
+    return this.lastBodyKey === (this.order[this.selectedIndex] ?? "")
+      ? this.lastBody.length
+      : 0;
+  }
+
+  private select(index: number): void {
+    this.selectedIndex = ((index % this.order.length) + this.order.length) % this.order.length;
+    this.anchor = null;
   }
 
   handleInput(data: string): void {
-    const pageSize = this.visibleLines();
-    const total = this.visualLines.length;
-    const maxScroll = Math.max(0, total - pageSize);
-    const clamp = () => {
-      this.scrollOffset = Math.max(0, Math.min(this.scrollOffset, maxScroll));
-    };
-    if (matchesKey(data, Key.left) && this.selectedIndex > 0) {
-      this.selectedIndex--;
-      this.scrollOffset = 0;
-    } else if (
-      matchesKey(data, Key.right) &&
-      this.selectedIndex < this.agentOrder.length - 1
-    ) {
-      this.selectedIndex++;
-      this.scrollOffset = 0;
+    const vh = this.viewportHeight();
+    const digit = /^[1-9]$/.exec(data);
+    if (digit) {
+      const idx = Number(digit[0]) - 1;
+      if (idx < this.order.length) this.select(idx);
+    } else if (matchesKey(data, Key.left)) {
+      this.select(this.selectedIndex - 1);
+    } else if (matchesKey(data, Key.right) || matchesKey(data, Key.tab)) {
+      this.select(this.selectedIndex + 1);
     } else if (matchesKey(data, Key.up)) {
-      this.scrollOffset++;
-      clamp();
+      if (this.anchor === null) this.anchor = Math.max(0, this.currentLength() - vh);
+      this.anchor = Math.max(0, this.anchor - 1);
     } else if (matchesKey(data, Key.down)) {
-      this.scrollOffset--;
-      clamp();
+      if (this.anchor === null) return;
+      this.anchor = Math.min(this.anchor + 1, Math.max(0, this.currentLength() - vh));
+      if (this.currentLength() - this.anchor <= vh) this.anchor = null;
     } else if (matchesKey(data, Key.pageUp)) {
-      this.scrollOffset += pageSize;
-      clamp();
+      if (this.anchor === null) this.anchor = Math.max(0, this.currentLength() - vh);
+      this.anchor = Math.max(0, this.anchor - vh);
     } else if (matchesKey(data, Key.pageDown)) {
-      this.scrollOffset -= pageSize;
-      clamp();
+      if (this.anchor === null) return;
+      this.anchor = Math.min(this.anchor + vh, Math.max(0, this.currentLength() - vh));
+      if (this.currentLength() - this.anchor <= vh) this.anchor = null;
+    } else if (matchesKey(data, Key.end)) {
+      this.anchor = null;
     } else if (matchesKey(data, Key.escape)) {
       this.onClose();
     }
   }
 
-  private bordered(text: string, innerWidth: number): string {
-    const visible = visibleWidth(text);
-    const pad = Math.max(0, innerWidth - visible);
-    return `\u2502 ${text}${pad ? " ".repeat(pad) : ""} \u2502`;
+  private createEntry(block: AgentBlock): BlockEntry {
+    if (block.kind === "assistant") {
+      const component = new AssistantMessageComponent(
+        block.message ?? undefined,
+        false,
+        getMarkdownTheme(),
+      );
+      return { component, renderedVersion: block.version, width: -1, lines: [] };
+    }
+    const component = new ToolExecutionComponent(
+      block.toolName,
+      block.toolCallId,
+      block.args,
+      {},
+      undefined,
+      this.tui,
+      this.cwd,
+    );
+    component.setExpanded(true);
+    if (block.result !== undefined) {
+      component.updateResult(block.result, false);
+    } else {
+      component.markExecutionStarted();
+      if (block.partial !== undefined) component.updateResult(block.partial, true);
+    }
+    return { component, renderedVersion: block.version, width: -1, lines: [] };
   }
 
-  render(width: number): string[] {
-    const lines: string[] = [];
-    const innerW = Math.max(1, width - 4);
-
-    // ── Agent tabs embedded in top border ────────
-    const tabs = this.agentOrder.map((key, i) => {
-      const state = this.agentStates.get(key);
-      const icon = state?.status === "done" ? "\u2713" : "\u25c9";
-      const label = `${icon} ${state?.agent ?? key}`;
-      if (i === this.selectedIndex) {
-        return `\x1b[7m ${label} \x1b[27m`;
+  private updateEntry(block: AgentBlock, entry: BlockEntry): void {
+    if (block.kind === "assistant") {
+      if (block.message !== undefined) {
+        (entry.component as AssistantMessageComponent).updateContent(
+          block.message,
+          block.streaming,
+        );
       }
-      return ` ${label} `;
-    });
-    const tabsStr = tabs.join("\u2502");
-    const truncatedTabs = truncateToWidth(tabsStr, width - 6);
-    const tabsVisible = visibleWidth(truncatedTabs);
-    const dashFill = Math.max(0, width - 6 - tabsVisible);
-    lines.push(
-      `\u250c\u2500\u2500 ${truncatedTabs} ${dashFill > 0 ? "\u2500".repeat(dashFill) : ""}\u2510`,
-    );
-
-    // ── Output of selected agent ─────────────────
-    const selectedKey = this.agentOrder[this.selectedIndex];
-    const state = this.agentStates.get(selectedKey ?? "");
-    const pageSize = this.visibleLines();
-    if (state) {
-      // Wrap (not truncate) long lines so content is never cut off
-      const visual: string[] = [];
-      for (const raw of state.output.split("\n")) {
-        for (const wrapped of wrapTextWithAnsi(stripLayoutAnsi(raw), innerW)) {
-          visual.push(wrapped);
-        }
-      }
-      this.visualLines = visual;
-      const totalLines = visual.length;
-      const maxStart = Math.max(0, totalLines - pageSize);
-      const start = Math.max(0, maxStart - Math.min(this.scrollOffset, maxStart));
-      const end = Math.min(totalLines, start + pageSize);
-
-      for (let i = start; i < end; i++) {
-        lines.push(this.bordered(visual[i] ?? "", innerW));
-      }
-
-      // ── Bottom border with help ────────────────
-      const above = start;
-      const below = totalLines - end;
-      const helpParts: string[] = [];
-      if (above > 0) helpParts.push(`\u2191 ${above} more`);
-      if (below > 0) helpParts.push(`\u2193 ${below} more`);
-      helpParts.push(
-        "\u2191\u2193 scroll",
-        "PgUp/PgDn page",
-        "\u2190\u2192 agent",
-        "Esc close",
-      );
-      const help = helpParts.join("  \u2022  ");
-      const truncatedHelp = truncateToWidth(help, width - 6);
-      const helpVisible = visibleWidth(truncatedHelp);
-      const helpFill = Math.max(0, width - 6 - helpVisible);
-      lines.push(
-        `\u2514\u2500\u2500 ${truncatedHelp}${helpFill > 0 ? "\u2500".repeat(helpFill) : ""}\u2518`,
-      );
     } else {
-      lines.push(this.bordered("No output", innerW));
-      lines.push(`\u2514\u2500\u2500 ${truncateToWidth("Esc close", width - 6)} ${"\u2500".repeat(Math.max(0, width - 6 - visibleWidth("Esc close")))}\u2518`);
+      const component = entry.component as ToolExecutionComponent;
+      if (block.result !== undefined) {
+        component.updateResult(block.result, false);
+      } else if (block.partial !== undefined) {
+        component.updateResult(block.partial, true);
+      }
+    }
+  }
+
+  /** Render the selected agent's transcript into a line buffer (cached per block). */
+  private renderBody(state: AgentState, width: number, agentKey: string): string[] {
+    let perAgent = this.blockEntries.get(agentKey);
+    if (!perAgent) {
+      perAgent = new Map();
+      this.blockEntries.set(agentKey, perAgent);
     }
 
+    const lines: string[] = [];
+    const taskLine = `Task: ${(state.task.split("\n")[0] ?? "").trim()}`;
+    lines.push(this.theme.fg("dim", truncateToWidth(taskLine, Math.max(1, width - 1))));
+    lines.push("");
+
+    state.blocks.forEach((block, bi) => {
+      let entry = perAgent.get(bi);
+      if (!entry) {
+        entry = this.createEntry(block);
+        perAgent.set(bi, entry);
+      }
+      if (entry.renderedVersion !== block.version) {
+        this.updateEntry(block, entry);
+        entry.renderedVersion = block.version;
+      }
+      if (entry.width !== width) {
+        entry.width = width;
+        entry.lines = entry.component.render(width);
+      }
+      lines.push(...entry.lines);
+    });
+
+    this.lastBody = lines;
+    this.lastBodyKey = agentKey;
     return lines;
   }
 
+  render(width: number): string[] {
+    const vh = this.viewportHeight();
+    const agentKey = this.order[this.selectedIndex] ?? "";
+    const state = this.states.get(agentKey);
+
+    // ── Tab bar ──
+    const tabs = this.order.map((key, i) => {
+      const st = this.states.get(key);
+      const icon = st?.status === "done" ? "\u2713" : st?.status === "error" ? "\u2717" : "\u25c9";
+      const label = `${i + 1} ${icon} ${st?.agent ?? key}`;
+      return i === this.selectedIndex ? `\x1b[7m ${label} \x1b[27m` : ` ${label} `;
+    });
+    const out: string[] = [truncateToWidth(tabs.join("\u2502"), width - 1)];
+
+    // ── Body window ──
+    const body = state
+      ? this.renderBody(state, width, agentKey)
+      : [this.theme.fg("error", "No agent selected")];
+    const total = body.length;
+    const start = this.anchor === null
+      ? Math.max(0, total - vh)
+      : Math.max(0, Math.min(this.anchor, Math.max(0, total - vh)));
+    const visible = body.slice(start, start + vh);
+    while (visible.length < vh) visible.push("");
+    out.push(...visible);
+
+    // ── Help line ──
+    const pos = this.anchor === null
+      ? "\u2193 follow"
+      : `\u2261 ${start + 1}\u2013${Math.min(start + vh, total)} / ${total}`;
+    const help = truncateToWidth(
+      `${pos}  \u2022  1-9 tab  \u2022  \u2190\u2192/Tab agent  \u2022  \u2191\u2193 scroll  \u2022  PgUp/PgDn page  \u2022  End bottom  \u2022  Esc close`,
+      width,
+    );
+    out.push(this.theme.fg("dim", help));
+
+    return out;
+  }
+
   invalidate(): void {
-    // No cache — render() reads live state every time
+    // Components cache their own lines; versions drive updates.
   }
 }
 
@@ -340,7 +455,8 @@ async function spawnChild(
   task: string,
   cwd: string,
   signal: AbortSignal | undefined,
-  onProgress?: (output: string) => void,
+  state: AgentState,
+  onTick?: () => void,
 ): Promise<string> {
   const def = AGENTS[agentName];
   if (!def) throw new Error(`Unknown agent: ${agentName}`);
@@ -406,97 +522,82 @@ async function spawnChild(
     const killSession = () => { void session.abort(); };
     signal?.addEventListener("abort", killSession, { once: true });
 
-    // Display transcript for the peek overlay/widget: prompt, thinking,
-    // tool calls/results and assistant text. The value returned to the
-    // parent model stays the assistant's final text only.
-    let transcript = `\u25b8 TASK\n${task}\n`;
+    // Structured transcript for the full-screen viewer and widget:
+    // assistant messages (thinking + text) and tool executions as blocks.
+    // The value returned to the parent model stays the assistant text only.
     let finalText = "";
-    let curKind: "thinking" | "text" | null = null;
 
-    const appendBlock = (kind: "thinking" | "text", delta: string) => {
-      if (curKind !== kind) {
-        transcript +=
-          (transcript.endsWith("\n") ? "" : "\n") +
-          (kind === "thinking" ? "\n\u25b8 THINKING\n" : "\n\u25b8 ASSISTANT\n");
-        curKind = kind;
+    const lastAssistantBlock = (): AssistantBlock | undefined => {
+      for (let i = state.blocks.length - 1; i >= 0; i--) {
+        const b = state.blocks[i]!;
+        if (b.kind === "assistant") return b;
       }
-      transcript += delta;
+      return undefined;
     };
-
-    const summarizeArgs = (args: unknown): string => {
-      let s: string;
-      try {
-        s = JSON.stringify(args);
-      } catch {
-        s = String(args);
+    const toolBlock = (toolCallId: string): ToolBlock | undefined => {
+      for (let i = state.blocks.length - 1; i >= 0; i--) {
+        const b = state.blocks[i]!;
+        if (b.kind === "tool" && b.toolCallId === toolCallId) return b;
       }
-      s = s.replace(/\s+/g, " ");
-      return s.length > 120 ? `${s.slice(0, 117)}...` : s;
-    };
-
-    const previewResult = (result: unknown, tail = false): string => {
-      let text: string;
-      if (typeof result === "string") {
-        text = result;
-      } else if (Array.isArray((result as { content?: unknown[] })?.content)) {
-        text = (result as { content: { type: string; text?: string }[] }).content
-          .filter((c) => c.type === "text")
-          .map((c) => c.text ?? "")
-          .join("\n");
-      } else if (result != null) {
-        try {
-          text = JSON.stringify(result);
-        } catch {
-          text = String(result);
-        }
-      } else {
-        text = "";
-      }
-      text = text.replace(/\s+/g, " ").trim();
-      if (tail && text.length > 200) return `...${text.slice(-197)}`;
-      return text.length > 200 ? `${text.slice(0, 197)}...` : text;
-    };
-
-    // Streaming placeholder line per running tool call; updated in place
-    // (only one tool runs at a time inside a child session, so the line
-    // being replaced is always the last one in the transcript)
-    const streamingTools = new Set<string>();
-    const setStreamingLine = (toolCallId: string, preview: string): void => {
-      const line = `  \u27f3 ${preview}`;
-      if (streamingTools.has(toolCallId)) {
-        transcript = transcript.replace(/\n {2}\u27f3 [^\n]*$/, `\n${line}`);
-      } else {
-        streamingTools.add(toolCallId);
-        transcript += `\n${line}`;
-      }
+      return undefined;
     };
 
     const unsub = session.subscribe((ev) => {
-      if (ev.type === "message_update") {
-        const ame = ev.assistantMessageEvent;
-        if (ame.type === "thinking_delta") {
-          appendBlock("thinking", ame.delta);
-        } else if (ame.type === "text_delta") {
-          appendBlock("text", ame.delta);
-          finalText += ame.delta;
+      if (ev.type === "message_start" && ev.message.role === "assistant") {
+        state.blocks.push({
+          kind: "assistant",
+          message: ev.message as AssistantMsg,
+          streaming: true,
+          version: 0,
+        });
+      } else if (ev.type === "message_update" && ev.message.role === "assistant") {
+        const block = lastAssistantBlock();
+        if (block) {
+          block.message = ev.message as AssistantMsg;
+          block.streaming = true;
+          block.version++;
         }
+      } else if (ev.type === "message_end" && ev.message.role === "assistant") {
+        const block = lastAssistantBlock();
+        if (block) {
+          block.message = ev.message as AssistantMsg;
+          block.streaming = false;
+          block.version++;
+        }
+        finalText += (ev.message.content as { type: string; text?: string }[])
+          .filter((c) => c.type === "text")
+          .map((c) => c.text ?? "")
+          .join("");
       } else if (ev.type === "tool_execution_start") {
-        curKind = null;
-        transcript += `\n\u25b8 TOOL ${ev.toolName} ${summarizeArgs(ev.args)}\n`;
+        state.blocks.push({
+          kind: "tool",
+          toolCallId: ev.toolCallId,
+          toolName: ev.toolName,
+          args: ev.args,
+          partial: undefined,
+          result: undefined,
+          isError: false,
+          version: 0,
+        });
       } else if (ev.type === "tool_execution_update") {
-        const preview = previewResult(ev.partialResult, true);
-        if (preview) setStreamingLine(ev.toolCallId, preview);
-      } else if (ev.type === "tool_execution_end") {
-        // Drop the streaming placeholder line for this tool call
-        if (streamingTools.delete(ev.toolCallId)) {
-          transcript = transcript.replace(/\n {2}\u27f3 [^\n]*$/, "");
+        const block = toolBlock(ev.toolCallId);
+        if (block) {
+          block.partial = ev.partialResult;
+          block.version++;
         }
-        const preview = previewResult(ev.result);
-        transcript += `  \u2192 ${ev.isError ? "error" : "ok"}${preview ? `: ${preview}` : ""}\n`;
+      } else if (ev.type === "tool_execution_end") {
+        const block = toolBlock(ev.toolCallId);
+        if (block) {
+          block.result = ev.result;
+          block.isError = ev.isError;
+          block.partial = undefined;
+          block.version++;
+        }
       } else {
         return;
       }
-      onProgress?.(transcript);
+      state.version++;
+      onTick?.();
     });
 
     try {
@@ -520,11 +621,11 @@ async function spawnChild(
 export default function (pi: ExtensionAPI) {
   if (process.env[SUBAGENT_CHILD_ENV]) return;
 
-  // ── Keyboard shortcut: peek subagent overlay ───────────
+  // ── Keyboard shortcut: full-screen agent tabs viewer ──────
   pi.registerShortcut("alt+o", {
-    description: "Peek subagent output",
+    description: "Subagent tabs viewer",
     handler: async (ctx) => {
-      // Merge all active runs into one combined overlay view
+      // Merge all active runs into one combined viewer
       const combinedStates = new Map<string, AgentState>();
       const combinedOrder: string[] = [];
       for (let ri = 0; ri < activeRuns.length; ri++) {
@@ -536,16 +637,18 @@ export default function (pi: ExtensionAPI) {
         }
       }
       if (combinedStates.size === 0) {
-        ctx.ui.notify("No subagent activity to peek", "info");
+        ctx.ui.notify("No subagent activity to view", "info");
         return;
       }
 
       await ctx.ui.custom<void>(
-        (tui, _theme, _kb, done) => {
-          const peek = new SubagentPeek(
+        (tui, theme, _kb, done) => {
+          const viewer = new AgentViewer(
             combinedStates,
             combinedOrder,
             tui,
+            ctx.cwd,
+            theme,
             () => {
               clearInterval(pollInterval);
               done(undefined);
@@ -556,10 +659,10 @@ export default function (pi: ExtensionAPI) {
             350,
           );
           return {
-            render: (w) => peek.render(w),
-            invalidate: () => peek.invalidate(),
+            render: (w) => viewer.render(w),
+            invalidate: () => viewer.invalidate(),
             handleInput: (data) => {
-              peek.handleInput(data);
+              viewer.handleInput(data);
               tui.requestRender();
             },
           };
@@ -567,9 +670,9 @@ export default function (pi: ExtensionAPI) {
         {
           overlay: true,
           overlayOptions: {
-            anchor: "center",
-            width: "85%",
-            maxHeight: "90%",
+            anchor: "top-left",
+            width: "100%",
+            maxHeight: "100%",
           },
         },
       );
@@ -633,15 +736,17 @@ export default function (pi: ExtensionAPI) {
         }
       }
 
-      // ── Per-agent state tracking for live widget + overlay ──
+      // ── Per-agent state tracking for live widget + viewer ──
       const agentStates = new Map<string, AgentState>();
       const agentOrder: string[] = [];
       const taskKeys = tasks.map((t) => `#${++taskKeySeq} ${t.agent}`);
       for (const [i, t] of tasks.entries()) {
         agentStates.set(taskKeys[i]!, {
           agent: t.agent,
-          output: "",
+          task: t.task,
           status: "running",
+          blocks: [],
+          version: 0,
         });
         agentOrder.push(taskKeys[i]!);
       }
@@ -654,15 +759,13 @@ export default function (pi: ExtensionAPI) {
       const updateWidget = () => {
         const lines: string[] = [];
         for (const [, state] of agentStates) {
-          const icon = state.status === "done" ? "✓" : "◉";
-          const lastLine = state.output.trim().split("\n").pop() || "working...";
-          const snippet = lastLine.length > 55
-            ? lastLine.slice(0, 52) + "..."
-            : lastLine;
-          lines.push(`${icon} ${state.agent}: ${snippet}`);
+          const icon = state.status === "done" ? "✓" : state.status === "error" ? "✗" : "◉";
+          const snippet = lastSnippet(state);
+          const cut = snippet.length > 55 ? snippet.slice(0, 52) + "..." : snippet;
+          lines.push(`${icon} ${state.agent}: ${cut}`);
         }
         if (lines.length > 0) {
-          lines.push("Alt+O: peek agent output");
+          lines.push("Alt+O: agent tabs");
         }
         ctx.ui.setWidget("subagent", lines);
       };
@@ -676,10 +779,7 @@ export default function (pi: ExtensionAPI) {
         tasks.map(async (t, i) => {
           const key = taskKeys[i]!;
           try {
-            return await spawnChild(t.agent, t.task, ctx.cwd, signal, (output: string) => {
-              const state = agentStates.get(key);
-              if (state) state.output = output;
-
+            return await spawnChild(t.agent, t.task, ctx.cwd, signal, agentStates.get(key)!, () => {
               // Throttle widget updates to ~150ms intervals
               const now = Date.now();
               if (now - lastWidgetUpdate > 150) {
