@@ -7,7 +7,7 @@ import {
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import { keyHint } from "@earendil-works/pi-coding-agent";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { join } from "node:path";
 
@@ -42,7 +42,6 @@ import {
   truncateToWidth,
   visibleWidth,
   wrapTextWithAnsi,
-  Text,
   type TUI,
 } from "@earendil-works/pi-tui";
 
@@ -61,6 +60,57 @@ function stripLayoutAnsi(s: string): string {
     .replace(/\r/g, "").replace(/\x07/g, "")
     // Strip other control chars except TAB, LF, ESC (needed for color codes)
     .replace(/[\x00-\x08\x0B\x0C\x0E-\x1A\x1C-\x1F]/g, "");
+}
+
+// ── Left-strip rendering (same pattern as extensions/left-strip-tools.ts) ──
+
+type BgFn = (s: string) => string;
+
+/**
+ * Renders each line with a colored strip on the leftmost character position,
+ * keeping the rest of the line on the default background.
+ */
+class LeftStripBlock {
+  private lines: string[];
+  private getBgFn: () => BgFn;
+
+  constructor(lines: string[], getBgFn: () => BgFn) {
+    this.lines = lines;
+    this.getBgFn = getBgFn;
+  }
+
+  render(width: number): string[] {
+    const bgFn = this.getBgFn();
+    return this.lines.map((line) => {
+      if (line === "") return "";
+      return (
+        bgFn(" ") +
+        "\x1b[49m " +
+        truncateToWidth(line, Math.max(1, width - 2))
+      );
+    });
+  }
+
+  invalidate(): void {
+    // Nothing cached — getBgFn is called per render
+  }
+}
+
+function pendingOrDoneColor(
+  isDone: boolean,
+  isError: boolean,
+  theme: Theme,
+): BgFn {
+  const color = isDone
+    ? isError
+      ? "toolErrorBg"
+      : "toolSuccessBg"
+    : "toolPendingBg";
+  return (s: string) => theme.bg(color, s);
+}
+
+function resultBg(isError: boolean, theme: Theme): BgFn {
+  return (s: string) => theme.bg(isError ? "toolErrorBg" : "toolSuccessBg", s);
 }
 
 class SubagentPeek {
@@ -594,7 +644,7 @@ export default function (pi: ExtensionAPI) {
 
       if (tasks.length > 1) {
         onUpdate?.({ content: [{ type: "text",
-          text: `→ running ${tasks.length} agents concurrently...` }] });
+          text: `→ running ${tasks.length} agents concurrently...` }], details: {} });
       }
 
       const results = await Promise.all(
@@ -636,11 +686,9 @@ export default function (pi: ExtensionAPI) {
         entry.cleanupTimer = null;
       }, 4000);
 
-      const summaryLines: string[] = [];
       const lines: string[] = [];
       for (let i = 0; i < tasks.length; i++) {
         const header = `── ${tasks[i]!.agent} (${tasks[i]!.task.slice(0, 60)}) ──`;
-        summaryLines.push(header);
         lines.push(header);
         lines.push(results[i] || "(no output)");
         lines.push("");
@@ -649,24 +697,53 @@ export default function (pi: ExtensionAPI) {
       return {
         content: [{ type: "text", text: lines.join("\n").trim() || "(no output)" }],
         isError: false,
-        details: { summary: summaryLines.join("\n") },
+        details: {},
       };
     },
 
-    renderResult(result, { expanded, isPartial }, theme) {
-      if (isPartial) {
-        return new Text(theme.fg("accent", "→ running subagents..."), 0, 0);
+    renderShell: "self",
+
+    renderCall(args, theme, context) {
+      let title: string;
+      if (args.tasks) {
+        title =
+          theme.fg("toolTitle", theme.bold("subagent ")) +
+          theme.fg("accent", `×${args.tasks.length} `) +
+          theme.fg("dim", args.tasks.map((t: { agent: string }) => t.agent).join(", "));
+      } else {
+        const task = String(args.task ?? "").split("\n")[0] ?? "";
+        title =
+          theme.fg("toolTitle", theme.bold("subagent ")) +
+          theme.fg("accent", String(args.agent ?? "")) +
+          theme.fg("dim", ` · ${task.slice(0, 60)}`);
+      }
+      return new LeftStripBlock([title], () =>
+        pendingOrDoneColor(!context.isPartial, context.isError, theme),
+      );
+    },
+
+    renderResult(result, options, theme, context) {
+      if (options.isPartial) {
+        return new LeftStripBlock(
+          [theme.fg("accent", "→ running subagents...")],
+          () => (s: string) => theme.bg("toolPendingBg", s),
+        );
       }
 
       const full = result.content?.[0]?.type === "text" ? result.content[0].text : "";
+      const n = full.split("\n").length;
 
-      if (!expanded) {
-        const summary = result.details?.summary ?? full.split("\n").slice(0, 2).join("\n");
-        const text = theme.fg("success", "✓ ") + theme.fg("muted", summary);
-        return new Text(text + ` (${keyHint("app.tools.expand", "to expand")})`, 0, 0);
+      if (!options.expanded && !context.isError) {
+        const hint = keyHint("app.tools.expand", "ctrl+o to expand");
+        return new LeftStripBlock(
+          [theme.fg("dim", `└ ${n} line${n === 1 ? "" : "s"} · ${hint}`)],
+          () => resultBg(false, theme),
+        );
       }
 
-      return new Text(full, 0, 0);
+      return new LeftStripBlock(full.split("\n"), () =>
+        resultBg(context.isError, theme),
+      );
     },
   });
 
