@@ -168,7 +168,7 @@ export default function webSearchExtension(pi: ExtensionAPI) {
 
 		async execute(toolCallId, params, signal, onUpdate, ctx) {
 			if (signal?.aborted) {
-				return { content: [{ type: "text", text: "Search cancelled" }], details: {} };
+				return { content: [{ type: "text", text: "Search cancelled" }], isError: true, details: {} };
 			}
 
 			const apiKey = process.env.TAVILY_API_KEY;
@@ -331,7 +331,7 @@ export default function webSearchExtension(pi: ExtensionAPI) {
 
 		async execute(toolCallId, params, signal, onUpdate, ctx) {
 			if (signal?.aborted) {
-				return { content: [{ type: "text", text: "Research cancelled" }], details: {} };
+				return { content: [{ type: "text", text: "Research cancelled" }], isError: true, details: {} };
 			}
 
 			const apiKey = process.env.TAVILY_API_KEY;
