@@ -119,7 +119,7 @@ export default function webSearchExtension(pi: ExtensionAPI) {
 			if (!options.expanded && !context.isError) {
 				// Collapsed mode: just the result count (renderCall already shows the query)
 				const count = details?.total_results ?? 0;
-				const hint = keyHint("app.tools.expand", "ctrl+o to expand");
+				const hint = keyHint("app.tools.expand", "to expand");
 				return new LeftStripBlock(
 					[
 						theme.fg(
@@ -313,7 +313,7 @@ export default function webSearchExtension(pi: ExtensionAPI) {
 			}
 
 			if (!options.expanded && !context.isError) {
-				const hint = keyHint("app.tools.expand", "ctrl+o to expand");
+				const hint = keyHint("app.tools.expand", "to expand");
 				return new LeftStripBlock(
 					[theme.fg("dim", `└ started · report delivered async · ${hint}`)],
 					() => resultBg(false, theme),

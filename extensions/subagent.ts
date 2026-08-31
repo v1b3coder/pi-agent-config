@@ -876,7 +876,7 @@ export default function (pi: ExtensionAPI) {
       const n = full.split("\n").length;
 
       if (!options.expanded && !context.isError) {
-        const hint = keyHint("app.tools.expand", "ctrl+o to expand");
+        const hint = keyHint("app.tools.expand", "to expand");
         return new LeftStripBlock(
           [theme.fg("dim", `└ ${n} line${n === 1 ? "" : "s"} · ${hint}`)],
           () => resultBg(false, theme),
