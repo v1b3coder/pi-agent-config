@@ -1,37 +1,81 @@
 #!/usr/bin/env python3
-"""Unyka thermal printer (USB 1fc9:2016) — CLI + library.
+"""Unyka thermal printer (USB 1fc9:2016 / Ethernet) — CLI + library.
 
 Hardware-verified ESC/POS wrapper for this specific printer:
   - 80 mm paper, 576-dot printhead (48 chars Font A / 64 chars Font B)
   - Czech via ESC t 18 (CP852)
   - firmware self-reports are unreliable; only paper-verified facts here
 
-CLI:
-  sg lp -c 'python unyka_printer.py status'
-  sg lp -c 'python unyka_printer.py text "žluťoučký kůň" --czech --big'
-  sg lp -c 'python unyka_printer.py image photo.jpg --contrast 1.4 --brightness 1.25'
-  sg lp -c 'python unyka_printer.py cut [--full]'
-  sg lp -c 'python unyka_printer.py raw 1b7412...'
+Two transports, identical ESC/POS byte stream:
+  - USB:   sg lp -c 'python unyka_printer.py status'          (needs lp group)
+  - TCP:   python unyka_printer.py --host <ip> status         (raw port 9100,
+           no root/udev needed; on success --host updates last_ip in
+           printer.json so the next run can find the printer again)
 
-Requires: pyusb (always), pillow (only for `image`).
+CLI:
+  python unyka_printer.py [--host ip[:port]] status
+  python unyka_printer.py [--host ip] text "žluťoučký kůň" --big
+  python unyka_printer.py [--host ip] image photo.jpg --contrast 1.4 --brightness 1.25
+  python unyka_printer.py [--host ip] cut [--full]
+  python unyka_printer.py [--host ip] raw 1b7412...
+
+Requires: pyusb (only for USB), pillow (only for `image`).
 """
 import argparse
+import json
+import os
+import socket
 import sys
 import time
-
-import usb.core
-import usb.util
+# pyusb is imported lazily in __init__ (USB branch only) — over Ethernet the
+# script runs on plain python3 without any third-party packages
 
 VENDOR, PRODUCT = 0x1FC9, 0x2016
 WIDTH_DOTS = 576
 CP_CZECH = 18  # CP852 via ESC t
+MAC = "00:61:20:8e:2a:e4"  # stable identity of this printer (OUI unregistered)
+DEFAULT_PORT = 9100        # JetDirect raw ESC/POS
+STATE_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                          "printer.json")  # {mac, last_ip}
+
+
+def _remember_ip(ip):
+    """Update last_ip in printer.json (keep other keys)."""
+    state = {"mac": MAC, "last_ip": ip}
+    try:
+        with open(STATE_FILE) as f:
+            state.update(json.load(f))
+        state["mac"] = MAC
+    except Exception:
+        pass
+    state["last_ip"] = ip
+    try:
+        with open(STATE_FILE, "w") as f:
+            json.dump(state, f, indent=2)
+            f.write("\n")
+    except OSError:
+        pass  # read-only env: printing must not fail over bookkeeping
 
 
 class UnykaPrinter:
     """Connection + verified ESC/POS primitives for 1fc9:2016."""
 
-    def __init__(self, timeout=3000):
+    def __init__(self, timeout=3000, host=None):
         self.timeout = timeout
+        self.czech = True  # CP852 (Latin-2) default — safe for pure-ASCII text too
+        self.sock = None
+        if host:
+            if ":" in host:
+                host, _, port = host.rpartition(":")
+                self.port = int(port)
+            else:
+                self.port = DEFAULT_PORT
+            self.host = host
+            # raw TCP 9100 = JetDirect; the ESC/POS stream is identical to USB
+            self.sock = socket.create_connection((host, self.port), timeout / 1000)
+            self.sock.settimeout(timeout / 1000)
+            return
+        import usb.core, usb.util  # lazy: only the USB transport needs pyusb
         self.dev = usb.core.find(idVendor=VENDOR, idProduct=PRODUCT)
         if self.dev is None:
             raise RuntimeError("printer 1fc9:2016 not found (plugged in?)")
@@ -43,14 +87,22 @@ class UnykaPrinter:
                            if usb.util.endpoint_direction(ep.bEndpointAddress) == usb.util.ENDPOINT_OUT)
         self.in_ep = next(ep for ep in eps
                           if usb.util.endpoint_direction(ep.bEndpointAddress) == usb.util.ENDPOINT_IN)
-        self.czech = True  # CP852 (Latin-2) default — safe for pure-ASCII text too
 
     def send(self, data, timeout=None):
         """Send str (cp437-mapped control text) or bytes/list of raw bytes."""
         raw = bytes(data, "cp437", "replace") if isinstance(data, str) else bytes(data)
-        self.out_ep.write(raw, timeout or self.timeout)
+        if self.sock is not None:
+            self.sock.sendall(raw)
+        else:
+            self.out_ep.write(raw, timeout or self.timeout)
 
     def _read(self, n=64, timeout=None):
+        if self.sock is not None:
+            self.sock.settimeout((timeout or self.timeout) / 1000)
+            try:
+                return self.sock.recv(n)
+            except (socket.timeout, OSError):
+                return None
         try:
             return bytes(self.in_ep.read(n, timeout or self.timeout))
         except usb.core.USBError:
@@ -201,6 +253,9 @@ class UnykaPrinter:
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--host", metavar="IP[:PORT]",
+                    help="print over Ethernet (raw TCP, default port 9100) "
+                         "instead of USB; on success updates last_ip in printer.json")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("status")
@@ -228,7 +283,9 @@ def main():
     p.add_argument("hexbytes", help="hex string, e.g. 1b40")
 
     args = ap.parse_args()
-    pr = UnykaPrinter()
+    pr = UnykaPrinter(host=args.host)
+    if args.host:
+        _remember_ip(pr.host)  # connection succeeded → record where it lives
 
     if args.cmd == "status":
         pr.status()

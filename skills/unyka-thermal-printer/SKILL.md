@@ -2,7 +2,8 @@
 name: unyka-thermal-printer
 description: >
   Print on the NXP-based ESC/POS thermal receipt printer (USB 1fc9:2016
-  "USB Printer P", 80 mm paper). Use this skill whenever the user wants to
+  "USB Printer P", or Ethernet via raw TCP port 9100, MAC 00:61:20:8e:2a:e4,
+  80 mm paper). Use this skill whenever the user wants to
   print anything on a thermal printer or receipt printer — text, receipts,
   Czech diacritics, photos/images, logos, barcodes, QR codes — or asks about
   printer status, paper level, cutting, continuous printing, or connecting
@@ -14,7 +15,7 @@ description: >
   its own firmware reports and generic ESC/POS documentation.
 ---
 
-# Unyka thermal printer (1fc9:2016)
+# Unyka thermal printer (1fc9:2016, USB or Ethernet)
 
 80 mm ESC/POS receipt printer on an NXP MCU with OEM clone firmware.
 Everything below was verified by printing and measuring on actual paper —
@@ -45,7 +46,9 @@ and reports incorrect values.
 
 ## Environment setup
 
-The device nodes are `root:lp 0660`, so commands must run with the `lp` group:
+**USB only.** The device nodes are `root:lp 0660`, so commands must run with
+the `lp` group. Over **Ethernet none of this is needed** — TCP needs no
+special permissions (see the Ethernet section).
 
 ```bash
 # one-time (admin): sudo usermod -aG lp <user>
@@ -66,23 +69,32 @@ echo 'SUBSYSTEM=="usb", ATTRS{idVendor}=="1fc9", ATTRS{idProduct}=="2016", MODE=
 device open (libusb, detaches the kernel `usblp` driver), init, Czech
 codepage, and the verified quirks automatically.
 
-Dependencies (`pyusb`, `pillow`) are vendored in the skill's own venv at
-`.venv/` (git-ignored). If it is missing, recreate it:
+Dependencies are vendored in the skill's own venv at `.venv/` (git-ignored).
+If it is missing, recreate it:
 `python3 -m venv .venv && .venv/bin/pip install pyusb pillow`
 (or copy `usb/` + `PIL/` site-packages from any other venv of the same
 Python version when offline).
 
-Always invoke via the bundled venv — do NOT depend on a venv in whatever
-project you happen to be in:
+**Dependency matrix:**
+- `--host` (Ethernet) + `status`/`text`/`cut`/`raw`: **no dependencies** —
+  runs on plain `python3` (pyusb is imported lazily, only for USB).
+- `--host` + `image`: needs `pillow` (venv, or any Python with PIL).
+- USB transport: needs `pyusb` + `sg lp` group (venv).
+
+Do NOT depend on a venv in whatever project you happen to be in — use the
+bundled venv whenever dependencies are needed:
 
 ```bash
 SKILL=~/.pi/agent/skills/unyka-thermal-printer
+IP=$(python3 -c 'import json;print(json.load(open("'"$SKILL"'/printer.json"))["last_ip"])')
+# Ethernet, plain python3 (preferred — no sg lp, no venv needed):
+python3 $SKILL/scripts/unyka_printer.py --host $IP status
+python3 $SKILL/scripts/unyka_printer.py --host $IP text 'žluťoučký kůň' --big   # CP852 default
+python3 $SKILL/scripts/unyka_printer.py --host $IP text 'plain ascii' --no-czech # opt out → CP437
+python3 $SKILL/scripts/unyka_printer.py --host $IP cut                          # partial cut
+# USB (needs the venv's pyusb + lp group) and image (needs pillow):
 sg lp -c "$SKILL/.venv/bin/python $SKILL/scripts/unyka_printer.py status"
-sg lp -c "$SKILL/.venv/bin/python $SKILL/scripts/unyka_printer.py text 'žluťoučký kůň' --big"   # CP852 default
-sg lp -c "$SKILL/.venv/bin/python $SKILL/scripts/unyka_printer.py text 'plain ascii' --no-czech" # opt out → CP437
-sg lp -c "$SKILL/.venv/bin/python $SKILL/scripts/unyka_printer.py image photo.jpg --contrast 1.4 --brightness 1.25"
-sg lp -c "$SKILL/.venv/bin/python $SKILL/scripts/unyka_printer.py cut"          # partial cut
-sg lp -c "$SKILL/.venv/bin/python $SKILL/scripts/unyka_printer.py cut --full"
+$SKILL/.venv/bin/python $SKILL/scripts/unyka_printer.py --host $IP image photo.jpg --contrast 1.4 --brightness 1.25
 ```
 
 Subcommands: `status` (real-time status + paper), `text` (**CP852/Czech is the default**; `--no-czech` for CP437; `--big` double size, `--center`, `--bold`), `image` (resize to 576 px, autocontrast,
@@ -180,10 +192,57 @@ on USB printer class, no busy bit, no ASB push observed.
 | Font B `ESC M 1` | ✅ works despite `GS I 1` not answering for it |
 | EAN13, ITF, NV flash logos, buzzer, `DLE EOT 5–7`, `GS I 97` | ❌ |
 
-## Ethernet
+## Ethernet (preferred transport — verified 2026-08)
 
-The printer also has an Ethernet port. Same ESC/POS byte stream works over
-**raw TCP port 9100** (JetDirect) — just `socket.create_connection((ip, 9100))`
-and send identical bytes. Discovery: WS-Discovery (UDP 3702), mDNS (5353).
-IPP (631) / LPD (515) exist but clones are often minimal. Full details of the
-original discovery session live in `~/projekty/unyka/UNYKA.md`.
+Over network the USB printer class is irrelevant; the ESC/POS byte stream is
+wrapped in a raw TCP transport (JetDirect). The `--host` flag switches the
+bundled script to TCP on port 9100 — same subcommands, same output, and
+**no `sg lp` / udev / lp group needed**:
+
+```bash
+SKILL=~/.pi/agent/skills/unyka-thermal-printer
+P="$SKILL/scripts/unyka_printer.py"   # --host goes BEFORE the subcommand
+IP=$(python3 -c 'import json;print(json.load(open("'"$SKILL"'/printer.json"))["last_ip"])')
+$SKILL/.venv/bin/python $P --host $IP status
+$SKILL/.venv/bin/python $P --host $IP text 'žluťoučký kůň' --big
+$SKILL/.venv/bin/python $P --host $IP image photo.jpg
+```
+
+Library: `UnykaPrinter(host="10.110.147.237")` — identical primitives.
+
+### Device identity & state (`printer.json` in the skill dir)
+
+| Fact | Value |
+|---|---|
+| MAC | `00:61:20:8e:2a:e4` — stable unique identifier; **OUI 00:61:20 is NOT registered** (checked IEEE db, Wireshark, macvendors) — don't rely on vendor lookup, only the full MAC |
+| Ports | **9100** ESC/POS (JetDirect), 4000 (Xprinter LAN config, undocumented), 80 web UI; 515/631 closed |
+| Factory IP | static `192.168.123.100`, DHCP off; DHCP was later enabled via web UI |
+
+`printer.json` = `{"mac": ..., "last_ip": ...}`. The script updates `last_ip`
+on every successful `--host` connection. Always try `last_ip` first; only if
+it fails, run the discovery scan below.
+
+### Discovery when the IP changed (nmap scan)
+
+1. `nmap -p 9100 --open <subnet>/24` → few candidates.
+2. Fingerprint over TCP: send `DLE EOT 1` (`\x10\x04\x01`) to port 9100 →
+   exactly one byte `0x16` = this printer (generic web servers reply with
+   ASCII HTTP errors). Port profile: 9100 + 4000 + 80 open, 515/631 closed.
+3. Confirm the MAC: `ip neigh show <ip>` → `00:61:20:8e:2a:e4`.
+4. Ultimate proof: send a test line to 9100 and watch the paper.
+5. Update `printer.json` (`last_ip`).
+
+Last resort: power-cycle holding FEED → self-test page prints the current IP.
+Setting a DHCP reservation for the MAC keeps the IP stable.
+
+### Ethernet quirks
+
+- `DLE EOT` fingerprint is identical on both transports (USB == TCP 9100);
+  everything else in this document applies verbatim.
+- Web UI (port 80) is a single-threaded frame page; `curl` gets zero bytes —
+  raw sockets only (`GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n`),
+  ≥2 s between requests.
+- Network config (IP/DHCP) **cannot** be read or set over ESC/POS — swept
+  `GS I 51–55`, `GS I 6/7/97`, `DLE EOT 5–7`, `GS ( E`, ASB: no response.
+- mDNS, WS-Discovery, SNMP: ❌ none observed — nmap scanning is the only
+  reliable discovery method.
