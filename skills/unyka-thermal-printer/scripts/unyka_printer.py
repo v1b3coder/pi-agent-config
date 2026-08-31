@@ -43,7 +43,7 @@ class UnykaPrinter:
                            if usb.util.endpoint_direction(ep.bEndpointAddress) == usb.util.ENDPOINT_OUT)
         self.in_ep = next(ep for ep in eps
                           if usb.util.endpoint_direction(ep.bEndpointAddress) == usb.util.ENDPOINT_IN)
-        self.czech = False
+        self.czech = True  # CP852 (Latin-2) default — safe for pure-ASCII text too
 
     def send(self, data, timeout=None):
         """Send str (cp437-mapped control text) or bytes/list of raw bytes."""
@@ -59,12 +59,14 @@ class UnykaPrinter:
     # --- basics -------------------------------------------------------
     def init(self):
         self.send([0x1B, 0x40])  # ESC @ (resets formatting AND codepage!)
+        if self.czech:
+            self.set_czech()     # ESC @ dropped codepage back to CP437 — re-select
 
     def set_czech(self):
         self.send([0x1B, 0x74, CP_CZECH])  # ESC t 18 → CP852
 
     def text(self, s, big=False, center=False, bold=False, newline=True):
-        """Print text. Call set_czech() first for diacritics."""
+        """Print text. Czech (CP852) is default; set self.czech=False for CP437."""
         if center:
             self.send([0x1B, 0x61, 1])
         if big:
@@ -205,7 +207,8 @@ def main():
 
     p = sub.add_parser("text")
     p.add_argument("message")
-    p.add_argument("--czech", action="store_true", help="ESC t 18 + cp852")
+    p.add_argument("--czech", action="store_true", help="(default; kept for compat) ESC t 18 + cp852")
+    p.add_argument("--no-czech", action="store_true", help="plain CP437 instead of CP852")
     p.add_argument("--big", action="store_true", help="2x2 scale")
     p.add_argument("--bold", action="store_true")
     p.add_argument("--center", action="store_true")
@@ -230,10 +233,9 @@ def main():
     if args.cmd == "status":
         pr.status()
     elif args.cmd == "text":
-        pr.init()
-        if args.czech:
-            pr.set_czech()
-            pr.czech = True
+        pr.init()                 # ESC @ + re-selects CP852 when czech
+        if args.no_czech:
+            pr.czech = False
         pr.text(args.message, big=args.big, bold=args.bold, center=args.center)
         if not args.no_cut:
             pr.feed(2)

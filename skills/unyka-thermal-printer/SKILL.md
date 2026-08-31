@@ -29,7 +29,7 @@ and reports incorrect values.
 | Paper width | 80 mm, printhead 576 dots |
 | Font A line width | **48 chars** (12×24 dots) |
 | Font B line width | **64 chars** (9×17 dots, smaller glyphs, works incl. styles/scaling) |
-| Czech language | ✅ `ESC t 18` (CP852) + text encoded as `.encode("cp852")` |
+| Czech language | ✅ `ESC t 18` (CP852) + text encoded as `.encode("cp852")` — **default in the bundled script** (re-selected after every `ESC @`); opt out with `--no-czech` |
 | Graphics | ✅ `GS v 0` raster, arbitrary bitmaps at full 576-dot width |
 | Barcodes | ✅ CODE39, CODABAR, CODE128; ❌ EAN13, ITF |
 | QR codes | ✅ `GS ( k` |
@@ -78,14 +78,14 @@ project you happen to be in:
 ```bash
 SKILL=~/.pi/agent/skills/unyka-thermal-printer
 sg lp -c "$SKILL/.venv/bin/python $SKILL/scripts/unyka_printer.py status"
-sg lp -c "$SKILL/.venv/bin/python $SKILL/scripts/unyka_printer.py text 'žluťoučký kůň' --czech --big"
+sg lp -c "$SKILL/.venv/bin/python $SKILL/scripts/unyka_printer.py text 'žluťoučký kůň' --big"   # CP852 default
+sg lp -c "$SKILL/.venv/bin/python $SKILL/scripts/unyka_printer.py text 'plain ascii' --no-czech" # opt out → CP437
 sg lp -c "$SKILL/.venv/bin/python $SKILL/scripts/unyka_printer.py image photo.jpg --contrast 1.4 --brightness 1.25"
 sg lp -c "$SKILL/.venv/bin/python $SKILL/scripts/unyka_printer.py cut"          # partial cut
 sg lp -c "$SKILL/.venv/bin/python $SKILL/scripts/unyka_printer.py cut --full"
 ```
 
-Subcommands: `status` (real-time status + paper), `text` (CP852 text; `--big`
-double size, `--center`, `--bold`), `image` (resize to 576 px, autocontrast,
+Subcommands: `status` (real-time status + paper), `text` (**CP852/Czech is the default**; `--no-czech` for CP437; `--big` double size, `--center`, `--bold`), `image` (resize to 576 px, autocontrast,
 dither, print; tuned defaults `--contrast 1.4 --brightness 1.25` verified
 best on this printer), `cut` (partial by default, `--full` for full cut),
 `raw` (send hex bytes, for anything not covered).
