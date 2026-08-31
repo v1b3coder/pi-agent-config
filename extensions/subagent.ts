@@ -33,6 +33,9 @@ interface RunEntry {
 const activeRuns: RunEntry[] = [];
 // Ref-counted guard: safe under parallel execution (see spawnChild)
 let subagentChildCount = 0;
+// Global sequence for agent state keys — identical agent+task pairs running
+// twice in parallel must not collide (states would overwrite each other)
+let taskKeySeq = 0;
 
 // ── Peek overlay component ─────────────────────────────────────────
 
@@ -431,7 +434,7 @@ async function spawnChild(
       return s.length > 120 ? `${s.slice(0, 117)}...` : s;
     };
 
-    const previewResult = (result: unknown): string => {
+    const previewResult = (result: unknown, tail = false): string => {
       let text: string;
       if (typeof result === "string") {
         text = result;
@@ -450,7 +453,22 @@ async function spawnChild(
         text = "";
       }
       text = text.replace(/\s+/g, " ").trim();
+      if (tail && text.length > 200) return `...${text.slice(-197)}`;
       return text.length > 200 ? `${text.slice(0, 197)}...` : text;
+    };
+
+    // Streaming placeholder line per running tool call; updated in place
+    // (only one tool runs at a time inside a child session, so the line
+    // being replaced is always the last one in the transcript)
+    const streamingTools = new Set<string>();
+    const setStreamingLine = (toolCallId: string, preview: string): void => {
+      const line = `  \u27f3 ${preview}`;
+      if (streamingTools.has(toolCallId)) {
+        transcript = transcript.replace(/\n {2}\u27f3 [^\n]*$/, `\n${line}`);
+      } else {
+        streamingTools.add(toolCallId);
+        transcript += `\n${line}`;
+      }
     };
 
     const unsub = session.subscribe((ev) => {
@@ -465,7 +483,14 @@ async function spawnChild(
       } else if (ev.type === "tool_execution_start") {
         curKind = null;
         transcript += `\n\u25b8 TOOL ${ev.toolName} ${summarizeArgs(ev.args)}\n`;
+      } else if (ev.type === "tool_execution_update") {
+        const preview = previewResult(ev.partialResult, true);
+        if (preview) setStreamingLine(ev.toolCallId, preview);
       } else if (ev.type === "tool_execution_end") {
+        // Drop the streaming placeholder line for this tool call
+        if (streamingTools.delete(ev.toolCallId)) {
+          transcript = transcript.replace(/\n {2}\u27f3 [^\n]*$/, "");
+        }
         const preview = previewResult(ev.result);
         transcript += `  \u2192 ${ev.isError ? "error" : "ok"}${preview ? `: ${preview}` : ""}\n`;
       } else {
@@ -611,14 +636,14 @@ export default function (pi: ExtensionAPI) {
       // ── Per-agent state tracking for live widget + overlay ──
       const agentStates = new Map<string, AgentState>();
       const agentOrder: string[] = [];
-      for (const t of tasks) {
-        const key = `${t.agent}::${t.task}`;
-        agentStates.set(key, {
+      const taskKeys = tasks.map((t) => `#${++taskKeySeq} ${t.agent}`);
+      for (const [i, t] of tasks.entries()) {
+        agentStates.set(taskKeys[i]!, {
           agent: t.agent,
           output: "",
           status: "running",
         });
-        agentOrder.push(key);
+        agentOrder.push(taskKeys[i]!);
       }
 
       const runState: RunState = { agentStates, agentOrder };
@@ -648,10 +673,10 @@ export default function (pi: ExtensionAPI) {
       }
 
       const results = await Promise.all(
-        tasks.map(async (t) => {
+        tasks.map(async (t, i) => {
+          const key = taskKeys[i]!;
           try {
             return await spawnChild(t.agent, t.task, ctx.cwd, signal, (output: string) => {
-              const key = `${t.agent}::${t.task}`;
               const state = agentStates.get(key);
               if (state) state.output = output;
 
@@ -663,7 +688,6 @@ export default function (pi: ExtensionAPI) {
               }
             });
           } catch (err) {
-            const key = `${t.agent}::${t.task}`;
             const state = agentStates.get(key);
             if (state) state.status = "error";
             return `Error: ${err instanceof Error ? err.message : String(err)}`;
@@ -672,8 +696,8 @@ export default function (pi: ExtensionAPI) {
       );
 
       // Mark done/error, final widget update, then clear
-      for (const t of tasks) {
-        const state = agentStates.get(`${t.agent}::${t.task}`);
+      for (const key of taskKeys) {
+        const state = agentStates.get(key);
         if (state && state.status === "running") state.status = "done";
       }
       updateWidget();
