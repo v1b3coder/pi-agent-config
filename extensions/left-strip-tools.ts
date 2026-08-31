@@ -10,8 +10,9 @@
  * every line with a colored strip character. This preserves syntax
  * highlighting, diff formatting, truncation warnings, and key hints.
  *
- * For write (which has no built-in renderers), simple custom renderers
- * are used.
+ * For write, the built-in renderer (added upstream since this extension was
+ * forked) is wrapped directly — it manages its own expanded/collapsed
+ * content preview, so no collapsedSummary is applied.
  *
  * Install: copy to ~/.pi/agent/extensions/left-strip-tools.ts
  * Reload:  /reload
@@ -168,51 +169,6 @@ function collapsedSummary(
 }
 
 // ---------------------------------------------------------------------------
-// Helpers called by renderCall wrappers for title lines
-// ---------------------------------------------------------------------------
-
-function writeTitle(path: string, content: string, t?: Theme): string {
-  if (!t) return `write ${path}`;
-  const lc = content.split("\n").length;
-  return (
-    t.fg("toolTitle", t.bold("write ")) +
-    t.fg("accent", path) +
-    t.fg("dim", ` (${lc} lines)`)
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Write renderers — no built-in renderers exist, so we provide simple ones
-// ---------------------------------------------------------------------------
-
-function makeWriteCall(
-  args: { path: string; content: string },
-  theme: Theme,
-  context: RenderContext,
-): Component {
-  const titleLine = writeTitle(args.path, args.content, theme);
-  return new LeftStripBlock([titleLine], () =>
-    pendingOrDoneColor(!context.isPartial, context.isError, theme),
-  );
-}
-
-function makeWriteResult(
-  args: { path: string; content: string },
-  result: { content: Array<{ type: string; text?: string }>; isError?: boolean },
-  isError: boolean,
-  theme: Theme,
-): Component {
-  const lines: string[] = [];
-  const content = result.content[0];
-  if (content?.type === "text" && content.text.startsWith("Error")) {
-    lines.push(theme.fg("error", content.text.split("\n")[0]!));
-  } else {
-    lines.push(theme.fg("success", "Written"));
-  }
-  return new LeftStripBlock(lines, () => resultBg(isError, theme));
-}
-
-// ---------------------------------------------------------------------------
 // Extension entry point
 // ---------------------------------------------------------------------------
 
@@ -286,6 +242,17 @@ export default async function (pi: ExtensionAPI) {
     },
 
     renderResult(result, options, theme, context) {
+      // The built-in bash renderResult owns the elapsed-time ticker: it sets
+      // state.interval while streaming and clears it on the first completed
+      // pass. The collapsed path below skips the built-in renderer, so run it
+      // once after completion to clear the interval (otherwise it leaks and
+      // invalidates the TUI every second for the rest of the session).
+      if (!options.isPartial && (context.state as any).interval) {
+        const inner = (context.state as any)._lsBashResultInner;
+        const innerCtx = { ...context, lastComponent: inner };
+        const child = bashDef.renderResult!(result as any, options, theme, innerCtx);
+        (context.state as any)._lsBashResultInner = child;
+      }
       const collapsed = collapsedSummary(result, options, context, theme);
       if (collapsed) return collapsed;
       // Bash's renderResult uses lastComponent as a stateful render component
@@ -424,6 +391,10 @@ export default async function (pi: ExtensionAPI) {
   });
 
   // -- write ---------------------------------------------------------------
+  // write now has built-in renderers (streaming syntax-highlight cache,
+  // collapsed content preview with ctrl+o expand), so we just wrap them
+  // like the other tools. No collapsedSummary here: the built-in
+  // renderCall already manages its own expanded/collapsed content view.
   const writeDef = createWriteToolDefinition(cwd);
   pi.registerTool({
     name: "write",
@@ -439,12 +410,25 @@ export default async function (pi: ExtensionAPI) {
     },
 
     renderCall(args, theme, context) {
-      return makeWriteCall(args, theme, context);
+      const inner = (context.state as any)._lsWriteCallInner;
+      const innerCtx = { ...context, lastComponent: inner };
+      const child = writeDef.renderCall!(args, theme, innerCtx);
+      (context.state as any)._lsWriteCallInner = child;
+      return new LeftStripWrapper(child, () =>
+        pendingOrDoneColor(!context.isPartial, context.isError, theme),
+      );
     },
 
-    renderResult(result, { expanded }, theme, context) {
-      const args = context.args as { path: string; content: string };
-      return makeWriteResult(args, result, context.isError, theme);
+    renderResult(result, options, theme, context) {
+      const inner = (context.state as any)._lsWriteResultInner;
+      const innerCtx = { ...context, lastComponent: inner };
+      const child = writeDef.renderResult!(result as any, options, theme, innerCtx);
+      (context.state as any)._lsWriteResultInner = child;
+      return new LeftStripWrapper(child, () =>
+        options.isPartial
+          ? (s: string) => theme.bg("toolPendingBg", s)
+          : resultBg(context.isError, theme),
+      );
     },
   });
 }
