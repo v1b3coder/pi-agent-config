@@ -313,11 +313,15 @@ class AgentViewer {
         entry = this.createEntry(block);
         perAgent.set(bi, entry);
       }
-      if (entry.renderedVersion !== block.version) {
+      const versionChanged = entry.renderedVersion !== block.version;
+      const widthChanged = entry.width !== width;
+      if (versionChanged) {
         this.updateEntry(block, entry);
         entry.renderedVersion = block.version;
       }
-      if (entry.width !== width) {
+      // Re-render the block's lines whenever its content changed (live
+      // streaming) or the terminal width changed — not just on width.
+      if (versionChanged || widthChanged) {
         entry.width = width;
         entry.lines = entry.component.render(width);
       }
@@ -602,6 +606,20 @@ async function spawnChild(
 
     try {
       await session.prompt(`${def.systemPrompt}\n\nTask: ${task}`);
+      // Fallback: if no message_end text was captured (e.g. unusual event
+      // ordering), assemble the answer from the assistant blocks.
+      if (!finalText.trim()) {
+        finalText = state.blocks
+          .filter((b): b is AssistantBlock => b.kind === "assistant")
+          .map((b) =>
+            ((b.message?.content as { type: string; text?: string }[] | undefined) ?? [])
+              .filter((c) => c.type === "text")
+              .map((c) => c.text ?? "")
+              .join(""),
+          )
+          .filter((t) => t.trim())
+          .join("\n\n");
+      }
       return finalText.trim();
     } finally {
       signal?.removeEventListener("abort", killSession);
