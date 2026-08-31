@@ -41,7 +41,9 @@ import {
   Key,
   truncateToWidth,
   visibleWidth,
+  wrapTextWithAnsi,
   Text,
+  type TUI,
 } from "@earendil-works/pi-tui";
 
 // Strip only layout-breaking ANSI, preserve SGR color/style codes
@@ -66,20 +68,35 @@ class SubagentPeek {
   private agentOrder: string[];
   private selectedIndex = 0;
   private scrollOffset = 0;
-  private static VISIBLE_LINES = 20;
+  private tui: TUI;
+  private visualLines: string[] = [];
   private onClose: () => void;
 
   constructor(
     agentStates: Map<string, AgentState>,
     agentOrder: string[],
+    tui: TUI,
     onClose: () => void,
   ) {
     this.agentStates = agentStates;
     this.agentOrder = agentOrder;
+    this.tui = tui;
     this.onClose = onClose;
   }
 
+  /** Content rows available for output, derived from the terminal size. */
+  private visibleLines(): number {
+    const rows = this.tui.terminal?.rows ?? 30;
+    return Math.max(6, Math.min(rows - 8, Math.floor(rows * 0.9) - 4));
+  }
+
   handleInput(data: string): void {
+    const pageSize = this.visibleLines();
+    const total = this.visualLines.length;
+    const maxScroll = Math.max(0, total - pageSize);
+    const clamp = () => {
+      this.scrollOffset = Math.max(0, Math.min(this.scrollOffset, maxScroll));
+    };
     if (matchesKey(data, Key.left) && this.selectedIndex > 0) {
       this.selectedIndex--;
       this.scrollOffset = 0;
@@ -90,18 +107,17 @@ class SubagentPeek {
       this.selectedIndex++;
       this.scrollOffset = 0;
     } else if (matchesKey(data, Key.up)) {
-      const state = this.agentStates.get(
-        this.agentOrder[this.selectedIndex] ?? "",
-      );
-      const totalLines = state?.output.split("\n").length ?? 0;
-      const maxScroll = Math.max(0, totalLines - SubagentPeek.VISIBLE_LINES);
-      if (this.scrollOffset < maxScroll) {
-        this.scrollOffset++;
-      }
+      this.scrollOffset++;
+      clamp();
     } else if (matchesKey(data, Key.down)) {
-      if (this.scrollOffset > 0) {
-        this.scrollOffset--;
-      }
+      this.scrollOffset--;
+      clamp();
+    } else if (matchesKey(data, Key.pageUp)) {
+      this.scrollOffset += pageSize;
+      clamp();
+    } else if (matchesKey(data, Key.pageDown)) {
+      this.scrollOffset -= pageSize;
+      clamp();
     } else if (matchesKey(data, Key.escape)) {
       this.onClose();
     }
@@ -138,26 +154,38 @@ class SubagentPeek {
     // ── Output of selected agent ─────────────────
     const selectedKey = this.agentOrder[this.selectedIndex];
     const state = this.agentStates.get(selectedKey ?? "");
+    const pageSize = this.visibleLines();
     if (state) {
-      const contentLines = state.output.split("\n");
-      const totalLines = contentLines.length;
-      const maxStart = Math.max(0, totalLines - SubagentPeek.VISIBLE_LINES);
-      const start = Math.max(0, maxStart - this.scrollOffset);
-      const end = Math.min(totalLines, start + SubagentPeek.VISIBLE_LINES);
+      // Wrap (not truncate) long lines so content is never cut off
+      const visual: string[] = [];
+      for (const raw of state.output.split("\n")) {
+        for (const wrapped of wrapTextWithAnsi(stripLayoutAnsi(raw), innerW)) {
+          visual.push(wrapped);
+        }
+      }
+      this.visualLines = visual;
+      const totalLines = visual.length;
+      const maxStart = Math.max(0, totalLines - pageSize);
+      const start = Math.max(0, maxStart - Math.min(this.scrollOffset, maxStart));
+      const end = Math.min(totalLines, start + pageSize);
 
       for (let i = start; i < end; i++) {
-        const clean = stripLayoutAnsi(contentLines[i] ?? "");
-        lines.push(this.bordered(
-          truncateToWidth(clean, innerW),
-          innerW,
-        ));
+        lines.push(this.bordered(visual[i] ?? "", innerW));
       }
 
       // ── Bottom border with help ────────────────
-      const help =
-        this.scrollOffset > 0
-          ? `\u2191 ${totalLines - end} more  \u2022  \u2193 scroll  \u2022  \u2190\u2192 agent  \u2022  Esc close`
-          : `\u2191\u2193 scroll  \u2022  \u2190\u2192 agent  \u2022  Esc close`;
+      const above = start;
+      const below = totalLines - end;
+      const helpParts: string[] = [];
+      if (above > 0) helpParts.push(`\u2191 ${above} more`);
+      if (below > 0) helpParts.push(`\u2193 ${below} more`);
+      helpParts.push(
+        "\u2191\u2193 scroll",
+        "PgUp/PgDn page",
+        "\u2190\u2192 agent",
+        "Esc close",
+      );
+      const help = helpParts.join("  \u2022  ");
       const truncatedHelp = truncateToWidth(help, width - 6);
       const helpVisible = visibleWidth(truncatedHelp);
       const helpFill = Math.max(0, width - 6 - helpVisible);
@@ -259,7 +287,7 @@ async function spawnChild(
   task: string,
   cwd: string,
   signal: AbortSignal | undefined,
-  onProgress?: (delta: string) => void,
+  onProgress?: (output: string) => void,
 ): Promise<string> {
   const def = AGENTS[agentName];
   if (!def) throw new Error(`Unknown agent: ${agentName}`);
@@ -325,21 +353,80 @@ async function spawnChild(
     const killSession = () => { void session.abort(); };
     signal?.addEventListener("abort", killSession, { once: true });
 
-    const outputParts: string[] = [];
-    const unsub = session.subscribe((ev) => {
-      if (
-        ev.type === "message_update" &&
-        ev.assistantMessageEvent.type === "text_delta"
-      ) {
-        const delta = ev.assistantMessageEvent.delta;
-        outputParts.push(delta);
-        onProgress?.(delta);
+    // Display transcript for the peek overlay/widget: prompt, thinking,
+    // tool calls/results and assistant text. The value returned to the
+    // parent model stays the assistant's final text only.
+    let transcript = `\u25b8 TASK\n${task}\n`;
+    let finalText = "";
+    let curKind: "thinking" | "text" | null = null;
+
+    const appendBlock = (kind: "thinking" | "text", delta: string) => {
+      if (curKind !== kind) {
+        transcript +=
+          (transcript.endsWith("\n") ? "" : "\n") +
+          (kind === "thinking" ? "\n\u25b8 THINKING\n" : "\n\u25b8 ASSISTANT\n");
+        curKind = kind;
       }
+      transcript += delta;
+    };
+
+    const summarizeArgs = (args: unknown): string => {
+      let s: string;
+      try {
+        s = JSON.stringify(args);
+      } catch {
+        s = String(args);
+      }
+      s = s.replace(/\s+/g, " ");
+      return s.length > 120 ? `${s.slice(0, 117)}...` : s;
+    };
+
+    const previewResult = (result: unknown): string => {
+      let text: string;
+      if (typeof result === "string") {
+        text = result;
+      } else if (Array.isArray((result as { content?: unknown[] })?.content)) {
+        text = (result as { content: { type: string; text?: string }[] }).content
+          .filter((c) => c.type === "text")
+          .map((c) => c.text ?? "")
+          .join("\n");
+      } else if (result != null) {
+        try {
+          text = JSON.stringify(result);
+        } catch {
+          text = String(result);
+        }
+      } else {
+        text = "";
+      }
+      text = text.replace(/\s+/g, " ").trim();
+      return text.length > 200 ? `${text.slice(0, 197)}...` : text;
+    };
+
+    const unsub = session.subscribe((ev) => {
+      if (ev.type === "message_update") {
+        const ame = ev.assistantMessageEvent;
+        if (ame.type === "thinking_delta") {
+          appendBlock("thinking", ame.delta);
+        } else if (ame.type === "text_delta") {
+          appendBlock("text", ame.delta);
+          finalText += ame.delta;
+        }
+      } else if (ev.type === "tool_execution_start") {
+        curKind = null;
+        transcript += `\n\u25b8 TOOL ${ev.toolName} ${summarizeArgs(ev.args)}\n`;
+      } else if (ev.type === "tool_execution_end") {
+        const preview = previewResult(ev.result);
+        transcript += `  \u2192 ${ev.isError ? "error" : "ok"}${preview ? `: ${preview}` : ""}\n`;
+      } else {
+        return;
+      }
+      onProgress?.(transcript);
     });
 
     try {
       await session.prompt(`${def.systemPrompt}\n\nTask: ${task}`);
-      return outputParts.join("").trim();
+      return finalText.trim();
     } finally {
       signal?.removeEventListener("abort", killSession);
       unsub();
@@ -383,6 +470,7 @@ export default function (pi: ExtensionAPI) {
           const peek = new SubagentPeek(
             combinedStates,
             combinedOrder,
+            tui,
             () => {
               clearInterval(pollInterval);
               done(undefined);
@@ -512,10 +600,10 @@ export default function (pi: ExtensionAPI) {
       const results = await Promise.all(
         tasks.map(async (t) => {
           try {
-            return await spawnChild(t.agent, t.task, ctx.cwd, signal, (delta: string) => {
+            return await spawnChild(t.agent, t.task, ctx.cwd, signal, (output: string) => {
               const key = `${t.agent}::${t.task}`;
               const state = agentStates.get(key);
-              if (state) state.output += delta;
+              if (state) state.output = output;
 
               // Throttle widget updates to ~150ms intervals
               const now = Date.now();
