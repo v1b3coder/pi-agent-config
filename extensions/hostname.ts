@@ -35,7 +35,11 @@ function emitHostname(pi: ExtensionAPI): void {
 
 export default function (pi: ExtensionAPI): void {
   // Emit shortly after load so pi-footer's event listener is guaranteed to be registered.
-  setTimeout(() => emitHostname(pi), 1000);
+  const timer = setTimeout(() => emitHostname(pi), 1000);
+  // The captured pi goes stale when the session is replaced (newSession/fork/
+  // switchSession/reload). A pending timer would then throw the "stale ctx"
+  // assertion and crash pi, so clear it on shutdown.
+  pi.on("session_shutdown", () => clearTimeout(timer));
   // Re-emit on session start (pi-footer re-applies its footer then).
   pi.on("session_start", () => emitHostname(pi));
 }
