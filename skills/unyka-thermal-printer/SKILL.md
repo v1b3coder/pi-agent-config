@@ -93,6 +93,26 @@ best on this printer), `cut` (partial by default, `--full` for full cut),
 As a library, import it (`from unyka_printer import UnykaPrinter`) and use the
 same primitives for custom receipts/logs.
 
+## Auto-cut behavior of the `text`/`image` commands (important!)
+
+⚠️ **Every CLI invocation of `text` (and `image`) ends with `feed(2)` + a
+partial cut by default.** One call = one job = one snip. This is implicit —
+nothing in the command line hints at it.
+
+- To print without cutting: pass **`--no-cut`** to the command.
+- To cut only at the end of a multi-line job: send **one** command with
+  `--no-cut` per line, then a single final `cut` command — or better, open
+  the device once and print all lines in one job via the library
+  (`UnykaPrinter.text(...)` repeatedly, `pr.feed(2); pr.cut()` at the end).
+- Never run bare `text` (auto-cut) per line: each line gets its own cut,
+  shredding the output into confetti strips.
+- Rule of thumb: **cut exactly once, at the very end of the job** (unless
+  the receipt is intentionally split into sections).
+
+Real-world failure mode (verified): printing a multi-line poem as 13 separate
+`text` calls produced a cut after every line. Correct approach is a single
+library job or `--no-cut` on every line plus one final `cut`.
+
 ## Writing custom ESC/POS for this printer
 
 Connection pattern (pyusb, no root needed once in `lp` group):
