@@ -1,18 +1,12 @@
 ---
 name: unyka-thermal-printer
 description: >
-  Print on the NXP-based ESC/POS thermal receipt printer (USB 1fc9:2016
-  "USB Printer P", or Ethernet via raw TCP port 9100, MAC 00:61:20:8e:2a:e4,
-  80 mm paper). Use this skill whenever the user wants to
-  print anything on a thermal printer or receipt printer — text, receipts,
-  Czech diacritics, photos/images, logos, barcodes, QR codes — or asks about
-  printer status, paper level, cutting, continuous printing, or connecting
-  the printer via USB or Ethernet. Trigger on mentions of this printer,
-  1fc9:2016, ESC/POS, usblp, /dev/usb/lp*, thermal printer, or phrases like
+  Print on the NXP-based ESC/POS thermal receipt printer. Use this skill whenever
+  the user wants to print anything on a thermal printer or receipt printer — text,
+  receipts, photos/images, logos, barcodes, QR codes — or asks about
+  printer status, paper level or continuous printing. Trigger on mentions of this printer,
   "print this on the printer", "vytiskni na tiskárně", even when the printer
-  is not explicitly named. This skill encodes hardware-verified facts
-  (measurements on paper) about this specific printer that contradict both
-  its own firmware reports and generic ESC/POS documentation.
+  is not explicitly named.
 ---
 
 # Unyka thermal printer (1fc9:2016, USB or Ethernet)
