@@ -14,14 +14,61 @@
  * Requires TAVILY_API_KEY environment variable.
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
+import { keyHint } from "@earendil-works/pi-coding-agent";
 import type { Component } from "@earendil-works/pi-tui";
-import { Text } from "@earendil-works/pi-tui";
+import { truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
-function truncateToWidth(text: string, width: number): string {
-	if (text.length <= width) return text;
-	return text.slice(0, Math.max(0, width - 1)) + "…";
+// ─── Left-strip rendering (same pattern as extensions/left-strip-tools.ts) ──
+
+type BgFn = (s: string) => string;
+
+/**
+ * Renders each line with a colored strip on the leftmost character position,
+ * keeping the rest of the line on the default background.
+ */
+class LeftStripBlock {
+	private lines: string[];
+	private getBgFn: () => BgFn;
+
+	constructor(lines: string[], getBgFn: () => BgFn) {
+		this.lines = lines;
+		this.getBgFn = getBgFn;
+	}
+
+	render(width: number): string[] {
+		const bgFn = this.getBgFn();
+		return this.lines.map((line) => {
+			if (line === "") return "";
+			return (
+				bgFn(" ") +
+				"\x1b[49m " +
+				truncateToWidth(line, Math.max(1, width - 2))
+			);
+		});
+	}
+
+	invalidate(): void {
+		// Nothing cached — getBgFn is called per render
+	}
+}
+
+function pendingOrDoneColor(
+	isDone: boolean,
+	isError: boolean,
+	theme: Theme,
+): BgFn {
+	const color = isDone
+		? isError
+			? "toolErrorBg"
+			: "toolSuccessBg"
+		: "toolPendingBg";
+	return (s: string) => theme.bg(color, s);
+}
+
+function resultBg(isError: boolean, theme: Theme): BgFn {
+	return (s: string) => theme.bg(isError ? "toolErrorBg" : "toolSuccessBg", s);
 }
 
 export default function webSearchExtension(pi: ExtensionAPI) {
@@ -40,21 +87,26 @@ export default function webSearchExtension(pi: ExtensionAPI) {
 			"Use search_depth 'ultra-fast' or 'fast' for quick lookups; 'advanced' for thorough research.",
 		],
 
-		renderCall(args, _theme, context) {
-			const text = context.lastComponent ?? new Text("", 0, 0);
-			text.setText(
-				`web_search: ${truncateToWidth(args.query ?? "", 120)}`,
+		renderShell: "self",
+
+		renderCall(args, theme, context) {
+			const query = String(args.query ?? "").split("\n")[0] ?? "";
+			const title =
+				theme.fg("toolTitle", theme.bold("web_search ")) +
+				theme.fg("accent", truncateToWidth(query, 120));
+			return new LeftStripBlock([title], () =>
+				pendingOrDoneColor(!context.isPartial, context.isError, theme),
 			);
-			return text;
 		},
 
-		renderResult(
-			result: { content: { type: string; text?: string }[]; details: unknown },
-			options: { expanded: boolean; isPartial: boolean },
-			_theme: any,
-			context: any,
-		): Component {
-			const text = context.lastComponent ?? new Text("", 0, 0);
+		renderResult(result, options, theme, context): Component {
+			if (options.isPartial) {
+				return new LeftStripBlock(
+					[theme.fg("accent", "→ searching...")],
+					() => (s: string) => theme.bg("toolPendingBg", s),
+				);
+			}
+
 			const details = result.details as
 				| {
 						query: string;
@@ -64,19 +116,29 @@ export default function webSearchExtension(pi: ExtensionAPI) {
 				  }
 				| undefined;
 
-			if (!options.expanded) {
+			if (!options.expanded && !context.isError) {
 				// Collapsed mode: just the result count (renderCall already shows the query)
 				const count = details?.total_results ?? 0;
-				text.setText(`— ${count} result${count !== 1 ? "s" : ""}`);
-			} else {
-				// Expanded mode: show full results
-				const fullText = result.content
-					.filter((c: any) => c.type === "text")
-					.map((c: any) => c.text ?? "")
-					.join("\n");
-				text.setText(fullText);
+				const hint = keyHint("app.tools.expand", "ctrl+o to expand");
+				return new LeftStripBlock(
+					[
+						theme.fg(
+							"dim",
+							`└ ${count} result${count !== 1 ? "s" : ""} · ${hint}`,
+						),
+					],
+					() => resultBg(false, theme),
+				);
 			}
-			return text;
+
+			// Expanded mode: show full results
+			const fullText = result.content
+				.filter((c: any) => c.type === "text")
+				.map((c: any) => c.text ?? "")
+				.join("\n");
+			return new LeftStripBlock(fullText.split("\n"), () =>
+				resultBg(context.isError, theme),
+			);
 		},
 		parameters: Type.Object({
 			query: Type.String({
@@ -118,6 +180,7 @@ export default function webSearchExtension(pi: ExtensionAPI) {
 
 			onUpdate?.({
 				content: [{ type: "text", text: `🔍 Searching for "${params.query}"...` }],
+				details: {},
 			});
 
 			const body: Record<string, unknown> = {
@@ -228,6 +291,44 @@ export default function webSearchExtension(pi: ExtensionAPI) {
 			),
 		}),
 
+		renderShell: "self",
+
+		renderCall(args, theme, context) {
+			const input = String(args.input ?? "").split("\n")[0] ?? "";
+			const title =
+				theme.fg("toolTitle", theme.bold("web_research ")) +
+				theme.fg("accent", truncateToWidth(input, 100)) +
+				theme.fg("dim", ` · ${String(args.model ?? "mini")}`);
+			return new LeftStripBlock([title], () =>
+				pendingOrDoneColor(!context.isPartial, context.isError, theme),
+			);
+		},
+
+		renderResult(result, options, theme, context): Component {
+			if (options.isPartial) {
+				return new LeftStripBlock(
+					[theme.fg("accent", "→ researching... (30-120s, async)")],
+					() => (s: string) => theme.bg("toolPendingBg", s),
+				);
+			}
+
+			if (!options.expanded && !context.isError) {
+				const hint = keyHint("app.tools.expand", "ctrl+o to expand");
+				return new LeftStripBlock(
+					[theme.fg("dim", `└ started · report delivered async · ${hint}`)],
+					() => resultBg(false, theme),
+				);
+			}
+
+			const fullText = result.content
+				.filter((c: any) => c.type === "text")
+				.map((c: any) => c.text ?? "")
+				.join("\n");
+			return new LeftStripBlock(fullText.split("\n"), () =>
+				resultBg(context.isError, theme),
+			);
+		},
+
 		async execute(toolCallId, params, signal, onUpdate, ctx) {
 			if (signal?.aborted) {
 				return { content: [{ type: "text", text: "Research cancelled" }], details: {} };
@@ -250,6 +351,7 @@ export default function webSearchExtension(pi: ExtensionAPI) {
 						text: `🔬 Starting deep research on "${params.input}" (model: ${model})...`,
 					},
 				],
+				details: {},
 			});
 
 			// Fire off the research request — don't await, let it run in background.
