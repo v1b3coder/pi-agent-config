@@ -2,8 +2,8 @@
  * Left-Strip Tool Blocks — replaces full-block colored backgrounds with a
  * thin colored bar on the left edge of each tool call/result line.
  *
- * This re-registers all seven built-in coding tools
- * (read, bash, edit, write, grep, find, ls) with renderShell: "self" so the
+ * This re-registers six built-in coding tools
+ * (read, bash, write, grep, find, ls) with renderShell: "self" so the
  * default Box background is bypassed.
  * Instead of reimplementing content rendering, it wraps the built-in
  * renderCall/renderResult components in LeftStripWrapper, which prefixes
@@ -24,7 +24,6 @@ import type {
 import type { Component } from "@earendil-works/pi-tui";
 import {
   createBashToolDefinition,
-  createEditToolDefinition,
   createFindToolDefinition,
   createGrepToolDefinition,
   createLsToolDefinition,
@@ -141,7 +140,7 @@ function resultBg(isError: boolean, theme: Theme): BgFn {
 // `expanded` flag, which arrives here as options.expanded, revealing the
 // full output. Errors and in-progress/streaming results are always shown
 // in full — the latter also avoids interfering with the stateful inner
-// renderers (bash/read/edit) that accumulate across partial updates.
+// renderers (bash/read) that accumulate across partial updates.
 // ---------------------------------------------------------------------------
 
 function countOutputLines(result: {
@@ -423,59 +422,6 @@ export default async function (pi: ExtensionAPI) {
       );
     },
   });
-
-  // -- edit ----------------------------------------------------------------
-  // DISABLED: the left-strip wrapper currently leaks the built-in edit
-  // renderer's own line backgrounds into the body (body gets colored
-  // background behind the strip). Fall back to the built-in edit tool
-  // (default Box shell) until that is fixed. Set to true to re-enable.
-  const EDIT_LEFT_STRIP_ENABLED = false;
-  if (EDIT_LEFT_STRIP_ENABLED) {
-  const editDef = createEditToolDefinition(cwd);
-  pi.registerTool({
-    name: "edit",
-    label: "edit",
-    description: editDef.description,
-    promptSnippet: editDef.promptSnippet,
-    promptGuidelines: editDef.promptGuidelines,
-    parameters: editDef.parameters,
-    renderShell: "self",
-
-    async execute(toolCallId, params, signal, onUpdate, ctx) {
-      return editDef.execute(toolCallId, params, signal, onUpdate, ctx);
-    },
-
-    renderCall(args, theme, context) {
-      // Edit's renderCall uses context.state.callComponent and lastComponent.
-      // We store the inner call component and pass it as lastComponent.
-      const inner = (context.state as any)._lsEditCallInner;
-      const innerCtx = { ...context, lastComponent: inner };
-      const child = editDef.renderCall!(args, theme, innerCtx);
-      (context.state as any)._lsEditCallInner = child;
-      return new LeftStripWrapper(child, () =>
-        pendingOrDoneColor(!context.isPartial, context.isError, theme),
-      );
-    },
-
-    renderResult(result, options, theme, context) {
-      // Edit is never collapsed: its diff is rendered in renderCall, and this
-      // renderResult also reconciles the applied diff back into the call
-      // component, so it must always run.
-      // Edit's renderResult reuses lastComponent as a Container (clear/addChild).
-      // We pass the inner container and wrap the returned component.
-      const inner = (context.state as any)._lsEditResultInner;
-      const innerCtx = { ...context, lastComponent: inner };
-      const child = editDef.renderResult!(result as any, options, theme, innerCtx);
-      (context.state as any)._lsEditResultInner = child;
-      const isPartial = options.isPartial;
-      return new LeftStripWrapper(child, () =>
-        isPartial
-          ? (s: string) => theme.bg("toolPendingBg", s)
-          : resultBg(context.isError, theme),
-      );
-    },
-  });
-  } // end EDIT_LEFT_STRIP_ENABLED
 
   // -- write ---------------------------------------------------------------
   const writeDef = createWriteToolDefinition(cwd);

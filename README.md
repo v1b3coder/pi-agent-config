@@ -120,7 +120,7 @@ Pi starts with the current shell environment as a base. The `_env-injector` exte
 
 | Extension | Description |
 |---|---|
-| **`left-strip-tools.ts`** | Replaces the default full-block colored backgrounds on tool call/result lines with a thin colored bar on the left edge. Preserves syntax highlighting, diffs, and truncation warnings. Each tool (read, bash, edit, write, grep, find, ls) gets a color-coded strip — pending (blue), success (green), error (red). Results are collapsed by default (showing line count) with `Ctrl+O` to expand. |
+| **`left-strip-tools.ts`** | Replaces the default full-block colored backgrounds on tool call/result lines with a thin colored bar on the left edge. Preserves syntax highlighting, diffs, and truncation warnings. Each tool (read, bash, write, grep, find, ls) gets a color-coded strip — pending (blue), success (green), error (red). `edit` is intentionally not wrapped (its built-in renderer paints its own line backgrounds, which clash with the strip). Results are collapsed by default (showing line count) with `Ctrl+O` to expand. |
 | **`keybindings.json`** | Overrides `tui.input.newLine` to use `Shift+Enter` / `Ctrl+N` instead of plain Enter (which submits). |
 | **`themes/dark-strip.json`** — Custom `dark-strip` theme | Dark theme tuned for the left-strip tool rendering with distinct colors for tool states (`toolPendingBg`, `toolSuccessBg`, `toolErrorBg`), custom message backgrounds, and a cyan/blue accent palette. |
 
