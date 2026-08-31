@@ -17,3 +17,5 @@ pi-crash.log
 prompt-history.json
 package.json
 package-lock.json
+__pycache__/
+.venv/
