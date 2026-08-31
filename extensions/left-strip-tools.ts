@@ -425,6 +425,12 @@ export default async function (pi: ExtensionAPI) {
   });
 
   // -- edit ----------------------------------------------------------------
+  // DISABLED: the left-strip wrapper currently leaks the built-in edit
+  // renderer's own line backgrounds into the body (body gets colored
+  // background behind the strip). Fall back to the built-in edit tool
+  // (default Box shell) until that is fixed. Set to true to re-enable.
+  const EDIT_LEFT_STRIP_ENABLED = false;
+  if (EDIT_LEFT_STRIP_ENABLED) {
   const editDef = createEditToolDefinition(cwd);
   pi.registerTool({
     name: "edit",
@@ -469,6 +475,7 @@ export default async function (pi: ExtensionAPI) {
       );
     },
   });
+  } // end EDIT_LEFT_STRIP_ENABLED
 
   // -- write ---------------------------------------------------------------
   const writeDef = createWriteToolDefinition(cwd);
