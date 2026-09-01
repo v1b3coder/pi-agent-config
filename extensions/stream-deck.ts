@@ -30,20 +30,21 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			// 2. Find the last user prompt on the current branch and the entry before it
-			const branch = ctx.sessionManager.getBranch(); // leaf -> root
-			const lastUserIndex = branch.findIndex(
+			// getBranch() returns entries in chronological order (root -> leaf).
+			const branch = ctx.sessionManager.getBranch();
+			const lastUserIndex = branch.findLastIndex(
 				(entry) => entry.type === "message" && entry.message.role === "user",
 			);
 			if (lastUserIndex === -1) {
 				ctx.ui.notify("Nothing to undo", "warning");
 				return;
 			}
-			if (lastUserIndex >= branch.length - 1) {
+			if (lastUserIndex === 0) {
 				ctx.ui.notify("Already at the first prompt", "warning");
 				return;
 			}
 
-			const target = branch[lastUserIndex + 1];
+			const target = branch[lastUserIndex - 1];
 
 			// 3. Branch back to before the last user prompt (no LLM summary)
 			await ctx.navigateTree(target.id, { summarize: false });
