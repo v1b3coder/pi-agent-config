@@ -61,7 +61,6 @@
         "writing-plans",
         "tavily-search",
         "tavily-extract",
-        "pi-subagents",
         "pi-interactive-shell"
       ]
     }

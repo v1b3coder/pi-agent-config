@@ -1,5 +1,5 @@
 {
-  "lastChangelogVersion": "0.84.2",
+  "lastChangelogVersion": "0.84.4",
   "defaultProvider": "litellm",
   "defaultModel": "zai-org/GLM-5.3-Flash",
   "compaction": {
@@ -19,7 +19,6 @@
     {
       "source": "npm:pi-amplike",
       "extensions": [
-        "extensions/btw.ts",
         "extensions/handoff.ts",
         "extensions/modes.ts",
         "extensions/session-query.ts"
