@@ -45,7 +45,7 @@
   "enableInstallTelemetry": false,
   "terminal": {
     "showTerminalProgress": true,
-    "clearOnShrink": true
+    "clearOnShrink": false
   },
   "transport": "auto",
   "hideThinkingBlock": true,
