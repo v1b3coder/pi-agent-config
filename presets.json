@@ -4,27 +4,28 @@
     "development": {
       "skills-disabled": [
         "skill-creator",
+        "unyka-thermal-printer",
         "create-agentsmd",
         "design-an-interface",
         "dispatching-parallel-agents",
         "find-skills",
+        "finishing-a-development-branch",
         "grill-with-docs",
         "impeccable",
         "prd",
         "receiving-code-review",
-        "tdd-workflow",
-        "test-driven-development",
         "web-design-guidelines",
-        "tavily-search",
         "tavily-extract",
-        "tavily-research"
+        "tavily-research",
+        "mcp-scripting",
+        "pi-interactive-shell"
       ],
       "tools-disabled": [
-        "litellm_skill_list",
-        "litellm_skill_create",
-        "litellm_skill_delete",
-        "session_query",
-        "mcp"
+        "powershell",
+        "fusion",
+        "mcpScript",
+        "mcp",
+        "interactive_shell"
       ]
     },
     "office": {

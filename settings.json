@@ -20,15 +20,15 @@
       "source": "npm:pi-amplike",
       "extensions": [
         "extensions/handoff.ts",
-        "extensions/modes.ts",
-        "extensions/session-query.ts"
+        "!extensions/modes.ts",
+        "!extensions/session-query.ts"
       ],
       "skills": []
     },
     "npm:pi-footer",
     "npm:pi-mcp-adapter",
     "npm:pi-agentic-compaction",
-    "npm:pi-openplan",
+    "!npm:pi-openplan",
     "npm:pi-interactive-shell",
     "npm:@dreki-gg/pi-context7"
   ],
