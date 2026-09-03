@@ -16,7 +16,7 @@
         "zai-org/GLM-5.3-Flash": {
           "reasoning": true,
           "thinkingLevelMap": {
-            "off": "none",
+            "off": "low",
             "low": "low",
             "medium": "medium",
             "high": "max",
@@ -26,7 +26,7 @@
         "zai-org/GLM-5.3-Flash-High": {
           "reasoning": true,
           "thinkingLevelMap": {
-            "off": "none",
+            "off": "low",
             "low": "low",
             "medium": "medium",
             "high": "max",
@@ -36,7 +36,7 @@
         "zai-org/GLM-5.3-Flash-Low": {
           "reasoning": true,
           "thinkingLevelMap": {
-            "off": "none",
+            "off": "low",
             "low": "low",
             "medium": "medium",
             "high": "max",
