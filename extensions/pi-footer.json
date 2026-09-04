@@ -36,7 +36,7 @@
       {
         "id": "context-bar-mplo3kdl-vov8z6",
         "type": "context-bar",
-        "enabled": true,
+        "enabled": false,
         "options": {
           "raw": false,
           "hideWhenEmpty": false,
@@ -57,9 +57,24 @@
         }
       },
       {
+        "id": "event-mqlivectx-1ak4v8",
+        "type": "event",
+        "enabled": true,
+        "options": {
+          "raw": false,
+          "hideWhenEmpty": false,
+          "icon": "",
+          "text": "?",
+          "fg": "blue",
+          "bg": "default",
+          "bold": false,
+          "widgetId": "live-ctx"
+        }
+      },
+      {
         "id": "compactions-mpuj981n-8933r9",
         "type": "compactions",
-        "enabled": true,
+        "enabled": false,
         "options": {
           "raw": true,
           "icon": "",
@@ -94,6 +109,21 @@
           "bg": "default",
           "bold": false,
           "widgetId": "perf-speed"
+        }
+      },
+      {
+        "id": "event-mqlivegen-7brb3p",
+        "type": "event",
+        "enabled": false,
+        "options": {
+          "raw": false,
+          "hideWhenEmpty": true,
+          "icon": "",
+          "text": "",
+          "fg": "cyan",
+          "bg": "default",
+          "bold": false,
+          "widgetId": "live-gen"
         }
       }
     ],
