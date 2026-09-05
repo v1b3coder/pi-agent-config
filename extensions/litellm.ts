@@ -43,17 +43,16 @@
  *     calculation gives the same numbers; the header hook was redundant;
  *   • no `cacheControlFormat: "anthropic"` compat — no Claude routes here.
  *
- * Trade-off: models are registered statically at startup. The cached model
- * list (`litellm-cache.json` in the agent dir) is authoritative — when it
- * exists it is used as-is with no network round-trip; live discovery (one
- * fast LAN request, 5 s timeout, retried once) runs only when the cache is
- * missing, to create it. Delete the cache file to force a refresh — or run
- * /litellm-refresh, which invalidates the cache and re-runs discovery
- * through the exact same path.
+ * Trade-off: startup serves the cached model list (`litellm-cache.json` in
+ * the agent dir) with no network round-trip; live discovery (one fast LAN
+ * request, 5 s timeout, retried once) runs only when the cache is missing,
+ * to create it. After startup pi re-runs discovery in the background via
+ * the provider's `refreshModels` hook and re-syncs the cache, so the cache
+ * is at most one run stale. Delete the cache file to force a refresh.
  * If a Claude route is ever added through this proxy, add the anthropic
  * compat flag back.
  */
-import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { getModels, getProviders } from "@earendil-works/pi-ai/compat";
 import { getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -163,6 +162,7 @@ async function fetchJsonWithRetry(url: string, apiKey: string, signal?: AbortSig
       lastError = new Error(`HTTP ${result.status}`);
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error));
+      if (signal?.aborted) throw lastError; // caller cancelled — don't retry
     }
     if (attempt < DISCOVERY_ATTEMPTS) await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
   }
@@ -324,9 +324,9 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     process.env[ENV_MAX_VLLM_OUTPUT_TOKENS],
     DEFAULT_VLLM_MAX_OUTPUT_TOKENS,
   );
-  /** Sole model-load path, shared by startup and /litellm-refresh: serve the
-   *  disk cache when present (no network round-trip), otherwise run live
-   *  discovery and persist the result. Throws only when discovery fails. */
+  /** Startup model-load path: serve the disk cache when present (no network
+   *  round-trip), otherwise run live discovery and persist the result.
+   *  Throws only when discovery fails. */
   async function loadModels(): Promise<LmModel[]> {
     const cached = readModelCache(root, vllmMaxOutputTokens);
     if (cached) return cached;
@@ -335,19 +335,32 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     return discovered;
   }
 
-  /** Register (or, after a refresh, re-register) the provider. After the
-   *  initial load phase pi applies this immediately — no /reload needed. */
-  const register = (models: LmModel[]): void => {
+  let models: LmModel[] = [];
+
+  /** Register the provider. After the initial load phase pi applies this
+   *  immediately — no /reload needed. */
+  const register = (): void => {
     pi.registerProvider(PROVIDER, {
       name: "LiteLLM",
       baseUrl: `${root}/v1`,
       apiKey: `$${ENV_API_KEY}`, // pi resolves this per request; /login + --api-key work natively
       api: "openai-completions",
       models,
+      /** Live-discovery hook. Pi calls it after startup (fire-and-forget) and
+       *  whenever the model picker refreshes, so the disk cache stays at most
+       *  one run stale. The returned list is published synchronously into
+       *  the live registry. */
+      async refreshModels(context) {
+        if (!context.allowNetwork || context.signal.aborted) return models;
+        const fresh = await discoverModels(root, key, vllmMaxOutputTokens, context.signal);
+        if (context.signal.aborted) return models;
+        if (fresh.length === 0) return models; // never clobber a good cache or the live list
+        writeModelCache(root, vllmMaxOutputTokens, fresh);
+        return fresh;
+      },
     });
   };
 
-  let models: LmModel[] = [];
   try {
     models = await loadModels();
   } catch (error) {
@@ -356,31 +369,6 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       `litellm: model discovery failed (${message}) and no cached model list exists; provider registered without models — run /reload once the proxy is reachable.\n`,
     );
   }
-  register(models);
+  register();
 
-  pi.registerCommand("litellm-refresh", {
-    description: "Invalidate the cached LiteLLM model list and reload it from the proxy",
-    handler: async (_args, ctx) => {
-      try {
-        // Deleting the cache makes loadModels() take the live discovery path,
-        // exactly as if the cache had never been written.
-        rmSync(join(getAgentDir(), CACHE_FILE), { force: true });
-        const fresh = await loadModels();
-        register(fresh);
-        // Pi resolves enabledModels → scoped models once at startup; a re-register
-        // updates the live registry but never that list. New models only reach the
-        // picker's default scoped view after a restart.
-        ctx.ui.notify(
-          `litellm: cache invalidated, reloaded ${fresh.length} model(s) from ${root} — restart to apply to the scoped model list (Tab switches picker scope)`,
-          "info",
-        );
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        ctx.ui.notify(
-          `litellm: refresh failed (${message}); cache left invalidated — retry /litellm-refresh once the proxy is reachable`,
-          "error",
-        );
-      }
-    },
-  });
 }
