@@ -4,11 +4,12 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
  * Per-turn prefill & decode speed widget for pi-footer.
  *
  * Measures raw model throughput per LLM turn:
- *   - Prefill speed  = new_input_tokens_delta / time_to_first_token  (tok/s)
- *   - Decode speed   = output_tokens / generation_time              (tok/s)
+ *   - Prefill speed  = (input_tokens - cache_read) / time_to_first_token  (tok/s)
+ *   - Decode speed   = output_tokens / generation_time                   (tok/s)
  *
- * Prefill uses delta of input tokens between consecutive turns to exclude
- * cached/reused context and measure only newly processed prompt tokens.
+ * Time-to-first-token is anchored on the first streamed token (message_update),
+ * and prefill counts the full prompt minus the cached prefix (cacheRead): TTFT
+ * covers processing the entire prompt, not just the tokens added this turn.
  *
  * Emits values via pi.events for the pi-footer "Event" widget.
  *
@@ -33,9 +34,6 @@ let firstTokenTime = 0;
 let lastPrefillSpeed: number | null = null;
 let lastDecodeSpeed: number | null = null;
 let lastEmitted: string | null = null;
-
-// Track input token delta across turns (prefill = new tokens, not full context)
-let previousInputTokens = 0;
 
 // --- Helpers ---
 
@@ -73,22 +71,15 @@ function emitSpeed(pi: ExtensionAPI): void {
 export default function (pi: ExtensionAPI): void {
   // --- Turn tracking ---
 
-  pi.on("turn_start", (_event, ctx) => {
+  pi.on("turn_start", () => {
     turnStart = performance.now();
     firstTokenTime = 0;
-
-    // Initialize baseline from current context on first turn after load
-    if (previousInputTokens === 0) {
-      const usage = ctx.getContextUsage();
-      if (usage?.tokens && usage.tokens > 0) {
-        previousInputTokens = usage.tokens;
-      }
-    }
   });
 
-  pi.on("message_start", (event) => {
-    // The first assistant message_start of a turn marks time-to-first-token
-    if (event.message.role === "assistant" && firstTokenTime === 0) {
+  pi.on("message_update", () => {
+    // First streamed token of an assistant response marks time-to-first-token.
+    // message_start fires at HTTP response headers, before the first token.
+    if (firstTokenTime === 0) {
       firstTokenTime = performance.now();
     }
   });
@@ -97,21 +88,21 @@ export default function (pi: ExtensionAPI): void {
     if (event.message.role !== "assistant") return;
 
     const now = performance.now();
-    const msg = event.message as { usage?: { input: number; output: number } };
+    const msg = event.message as {
+      usage?: { input: number; output: number; cacheRead: number };
+    };
     const inputTokens = msg.usage?.input ?? 0;
     const outputTokens = msg.usage?.output ?? 0;
+    const cacheRead = msg.usage?.cacheRead ?? 0;
 
-    // Prefill speed: only delta since last turn (new tokens, not full context)
-    if (turnStart > 0 && firstTokenTime > 0 && previousInputTokens > 0) {
-      const newTokens = inputTokens - previousInputTokens;
+    // Prefill speed: TTFT covers processing the whole prompt, minus cached prefix
+    if (turnStart > 0 && firstTokenTime > 0) {
+      const prefilled = Math.max(0, inputTokens - cacheRead);
       const ttftMs = firstTokenTime - turnStart;
-      if (ttftMs > 0 && newTokens > 0) {
-        lastPrefillSpeed = newTokens / (ttftMs / 1000);
+      if (ttftMs > 0 && prefilled > 0) {
+        lastPrefillSpeed = prefilled / (ttftMs / 1000);
       }
     }
-
-    // Store for next turn's delta
-    previousInputTokens = inputTokens;
 
     // Decode speed: output tokens / generation time (after first token)
     if (firstTokenTime > 0) {
