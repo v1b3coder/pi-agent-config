@@ -27,6 +27,7 @@
  *   • model discovery via GET /model/info (rich metadata: pricing, context
  *     window, reasoning flags, vision), falling back to GET /v1/models only
  *     when /model/info returns 401/403/404 (LiteLLM virtual keys);
+ *     results are sorted alphabetically by model id;
  *   • models without an advertised input budget (max_input_tokens) are
  *     dropped — Pi cannot size the context window for compaction, so
  *     whisper/transcription routes never register as chat models;
@@ -147,6 +148,12 @@ function findCatalogModel(id: string) {
 
 // ─── discovery ─────────────────────────────────────────────────────────────
 
+/** Stable alphabetical order by model id. Pi's picker keeps registration
+ *  order within a provider, so sorting here is what makes the list readable. */
+function sortModels(models: LmModel[]): LmModel[] {
+  return [...models].sort((a, b) => a.id.localeCompare(b.id));
+}
+
 async function fetchJson(url: string, apiKey: string, signal?: AbortSignal) {
   const response = await fetch(url, {
     headers: { Authorization: `Bearer ${apiKey}`, Accept: "application/json" },
@@ -262,7 +269,7 @@ async function discoverModels(
   if (info.ok) {
     const entries = Array.isArray(info.data?.data) ? info.data.data : [];
     // Wildcard rows ("lemonade/*") are not usable model ids — drop them.
-    return entries.map((entry) => mapModelInfoEntry(entry, vllmMaxOutputTokens)).filter((model): model is LmModel => model !== undefined && !model.id.includes("*"));
+    return sortModels(entries.map((entry) => mapModelInfoEntry(entry, vllmMaxOutputTokens)).filter((model): model is LmModel => model !== undefined && !model.id.includes("*")));
   }
   if (![401, 403, 404].includes(info.status)) {
     throw new Error(`/model/info returned HTTP ${info.status}`);
@@ -270,7 +277,7 @@ async function discoverModels(
   const list = await fetchJsonWithRetry(`${baseUrl}/v1/models`, apiKey, signal);
   if (!list.ok) throw new Error(`/v1/models returned HTTP ${list.status}`);
   const entries = Array.isArray(list.data?.data) ? list.data.data : [];
-  return entries.map((entry) => mapModelsListEntry(entry, vllmMaxOutputTokens)).filter((model): model is LmModel => model !== undefined);
+  return sortModels(entries.map((entry) => mapModelsListEntry(entry, vllmMaxOutputTokens)).filter((model): model is LmModel => model !== undefined));
 }
 
 // ─── disk cache (last successful discovery, keyed by proxy URL) ────────────
@@ -297,7 +304,8 @@ function readModelCache(baseUrl: string, vllmMaxOutputTokens: number): LmModel[]
     ) {
       return undefined;
     }
-    return cached.models as LmModel[];
+    // Sort on read too: caches written before this change may be unsorted.
+    return sortModels(cached.models as LmModel[]);
   } catch {
     return undefined; // missing or unreadable — start without models
   }
