@@ -14,7 +14,19 @@
 
 set -uo pipefail
 
-REPO_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# Resolve symlinks so the script works when invoked from another folder
+# (e.g. ~/bin/pi-update -> ~/.pi/agent/pi-update.sh): BASH_SOURCE[0] is the
+# path used to invoke, which may be a symlink.
+src="${BASH_SOURCE[0]}"
+while [ -L "$src" ]; do
+  src_dir="$(cd -P -- "$(dirname -- "$src")" && pwd)"
+  src="$(readlink "$src")"
+  case "$src" in
+    /*) ;;
+    *) src="$src_dir/$src" ;;
+  esac
+done
+REPO_DIR="$(cd -P -- "$(dirname -- "$src")" && pwd)"
 cd "$REPO_DIR"
 
 BOLD=$'\033[1m'
