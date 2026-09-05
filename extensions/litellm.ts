@@ -48,7 +48,11 @@
  * request, 5 s timeout, retried once) runs only when the cache is missing,
  * to create it. After startup pi re-runs discovery in the background via
  * the provider's `refreshModels` hook and re-syncs the cache, so the cache
- * is at most one run stale. Delete the cache file to force a refresh.
+ * is at most one run stale. The proxy is LAN/VPN-only, so the background
+ * refresh also runs when PI_OFFLINE is set (a session_start trigger passes
+ * allowNetwork explicitly, like the llama.cpp extension for its local
+ * server); PI_OFFLINE still blocks all other, public network activity.
+ * Delete the cache file to force a refresh.
  * If a Claude route is ever added through this proxy, add the anthropic
  * compat flag back.
  */
@@ -348,8 +352,9 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       models,
       /** Live-discovery hook. Pi calls it after startup (fire-and-forget) and
        *  whenever the model picker refreshes, so the disk cache stays at most
-       *  one run stale. The returned list is published synchronously into
-       *  the live registry. */
+       *  one run stale. Honors context.allowNetwork; the session_start
+       *  trigger below passes allowNetwork: true even under PI_OFFLINE. The
+       *  returned list is published synchronously into the live registry. */
       async refreshModels(context) {
         if (!context.allowNetwork || context.signal.aborted) return models;
         const fresh = await discoverModels(root, key, vllmMaxOutputTokens, context.signal);
@@ -371,4 +376,14 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   }
   register();
 
+  // PI_OFFLINE: pi skips its own startup catalog refresh, but this proxy is
+  // LAN/VPN-only — keep the cache sync live even then (same policy as the
+  // llama.cpp extension for its local server). Everything else PI_OFFLINE
+  // blocks (version checks, package updates, pi.dev catalogs) stays blocked.
+  pi.on("session_start", (event, ctx) => {
+    if (!process.env.PI_OFFLINE || event.reason !== "startup") return;
+    void ctx.modelRegistry
+      .refresh({ providers: [PROVIDER], allowNetwork: true, signal: AbortSignal.timeout(15_000) })
+      .catch(() => {});
+  });
 }
