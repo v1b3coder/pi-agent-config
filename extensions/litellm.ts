@@ -27,6 +27,9 @@
  *   • model discovery via GET /model/info (rich metadata: pricing, context
  *     window, reasoning flags, vision), falling back to GET /v1/models only
  *     when /model/info returns 401/403/404 (LiteLLM virtual keys);
+ *   • models without an advertised input budget (max_input_tokens) are
+ *     dropped — Pi cannot size the context window for compaction, so
+ *     whisper/transcription routes never register as chat models;
  *   • metadata enrichment from pi's *bundled* catalog only (local data).
  *     No network calls beyond the proxy itself;
  *   • per-request auth via pi's native `$LITELLM_API_KEY` resolution —
@@ -180,6 +183,10 @@ function mapModelInfoEntry(entry: any, vllmMaxOutputTokens: number): LmModel | u
   const info = entry.model_info ?? {};
   const mode = typeof info.mode === "string" ? info.mode : undefined;
   if (mode !== undefined && !/^chat$/i.test(mode) && !/^responses$/i.test(mode)) return undefined;
+  // No advertised input budget → Pi would have to guess the context window
+  // for compaction (whisper transcription routes and bare pass-throughs all
+  // look like this). Drop instead of registering them as text models.
+  if (num(info.max_input_tokens) === undefined) return undefined;
   const catalog = findCatalogModel(id);
 
   // supports_*_reasoning_effort booleans → pi thinking-level map (null = unsupported)
@@ -228,6 +235,9 @@ function mapModelsListEntry(entry: any, vllmMaxOutputTokens: number): LmModel | 
   if (!id) return undefined;
   const catalog = findCatalogModel(id);
   const info = entry?.model_info ?? {};
+  // Sparse /v1/models entries pass only when metadata or the bundled catalog
+  // can supply an input budget; otherwise Pi cannot size the context window.
+  if (num(info.max_input_tokens) === undefined && !catalog) return undefined;
   const advertised = num(info.max_output_tokens) ?? catalog?.maxTokens ?? DEFAULT_MAX_TOKENS;
   return {
     id,
