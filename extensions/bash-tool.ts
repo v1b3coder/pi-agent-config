@@ -7,15 +7,15 @@
  * thin colored strip on the left edge of every line.
  *
  * Tool signature: adds a required `description` parameter — a one-line
- * summary of what the command does. The description replaces the
- * "$ <command>" header when the result is collapsed, and is shown as a muted
- * secondary line below the command when expanded (ctrl+o). Execution is
- * delegated to the built-in createBashToolDefinition; the built-in
- * renderResult (syntax highlighting, truncation warnings, elapsed-time
- * ticker) is wrapped as-is. Errors and streaming/partial results always
- * render in full — the latter also avoids interfering with the stateful inner
- * renderer (BashResultRenderComponent) that accumulates across partial
- * updates.
+ * summary of what the command does. The description is the dominant header
+ * in both forms: compacted shows it alone (replacing "$ <command>"),
+ * expanded shows it first with the command as a secondary muted line below.
+ * Execution is delegated to the built-in createBashToolDefinition; the
+ * built-in renderResult (syntax highlighting, truncation warnings,
+ * elapsed-time ticker) is wrapped as-is. Errors and streaming/partial
+ * results always render in full — the latter also avoids interfering with
+ * the stateful inner renderer (BashResultRenderComponent) that accumulates
+ * across partial updates.
  *
  * Reload: /reload
  */
@@ -244,24 +244,22 @@ export default async function (pi: ExtensionAPI) {
       const timeoutSuffix = args?.timeout
         ? theme.fg("muted", ` (timeout ${args.timeout}s)`)
         : "";
-      if (isCompact) {
-        // Compacted form: description replaces the "$ <command>" header;
-        // the timeout is still shown as a muted suffix.
-        const label = description || `$ ${command ?? ""}`;
-        return new LeftStripBlock(
-          [theme.fg("toolTitle", label) + timeoutSuffix],
-          bgFn,
-        );
-      }
-      // Expanded (or streaming/error): command header with the description
-      // as a secondary muted line below it.
-      const lines = [
-        theme.fg("toolTitle", theme.bold(`$ ${command ?? ""}`)) + timeoutSuffix,
-      ];
+      // Description is the dominant header in both forms; in the expanded
+      // view the command follows as a secondary muted line.
       if (description) {
-        lines.push(theme.fg("muted", `  ${description}`));
+        const lines = [
+          theme.fg("toolTitle", theme.bold(description)) + timeoutSuffix,
+        ];
+        if (!isCompact) {
+          lines.push(theme.fg("muted", `  $ ${command ?? ""}`));
+        }
+        return new LeftStripBlock(lines, bgFn);
       }
-      return new LeftStripBlock(lines, bgFn);
+      // Fallback when description is missing: show the command as before.
+      return new LeftStripBlock(
+        [theme.fg("toolTitle", theme.bold(`$ ${command ?? ""}`)) + timeoutSuffix],
+        bgFn,
+      );
     },
 
     renderResult(result, options, theme, context) {
