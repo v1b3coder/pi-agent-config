@@ -2,9 +2,10 @@
  * Left-Strip Tool Blocks — replaces full-block colored backgrounds with a
  * thin colored bar on the left edge of each tool call/result line.
  *
- * This re-registers six built-in coding tools
- * (read, bash, write, grep, find, ls) with renderShell: "self" so the
- * default Box background is bypassed.
+ * This re-registers five built-in coding tools
+ * (read, write, grep, find, ls) with renderShell: "self" so the
+ * default Box background is bypassed. The bash tool was split into
+ * bash-tool.ts (same left-strip rendering).
  * Instead of reimplementing content rendering, it wraps the built-in
  * renderCall/renderResult components in LeftStripWrapper, which prefixes
  * every line with a colored strip character. This preserves syntax
@@ -24,7 +25,6 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import type { Component } from "@earendil-works/pi-tui";
 import {
-  createBashToolDefinition,
   createFindToolDefinition,
   createGrepToolDefinition,
   createLsToolDefinition,
@@ -207,60 +207,6 @@ export default async function (pi: ExtensionAPI) {
       const innerCtx = { ...context, lastComponent: inner };
       const child = readDef.renderResult!(result, options, theme, innerCtx);
       (context.state as any)._lsReadResultInner = child;
-      const isPartial = options.isPartial;
-      return new LeftStripWrapper(child, () =>
-        isPartial
-          ? (s: string) => theme.bg("toolPendingBg", s)
-          : resultBg(context.isError, theme),
-      );
-    },
-  });
-
-  // -- bash ----------------------------------------------------------------
-  const bashDef = createBashToolDefinition(cwd);
-  pi.registerTool({
-    name: "bash",
-    label: "bash",
-    description: bashDef.description,
-    promptSnippet: bashDef.promptSnippet,
-    promptGuidelines: bashDef.promptGuidelines,
-    parameters: bashDef.parameters,
-    renderShell: "self",
-
-    async execute(toolCallId, params, signal, onUpdate, ctx) {
-      return bashDef.execute(toolCallId, params, signal, onUpdate, ctx);
-    },
-
-    renderCall(args, theme, context) {
-      const inner = (context.state as any)._lsBashCallInner;
-      const innerCtx = { ...context, lastComponent: inner };
-      const child = bashDef.renderCall!(args, theme, innerCtx);
-      (context.state as any)._lsBashCallInner = child;
-      return new LeftStripWrapper(child, () =>
-        pendingOrDoneColor(!context.isPartial, context.isError, theme),
-      );
-    },
-
-    renderResult(result, options, theme, context) {
-      // The built-in bash renderResult owns the elapsed-time ticker: it sets
-      // state.interval while streaming and clears it on the first completed
-      // pass. The collapsed path below skips the built-in renderer, so run it
-      // once after completion to clear the interval (otherwise it leaks and
-      // invalidates the TUI every second for the rest of the session).
-      if (!options.isPartial && (context.state as any).interval) {
-        const inner = (context.state as any)._lsBashResultInner;
-        const innerCtx = { ...context, lastComponent: inner };
-        const child = bashDef.renderResult!(result as any, options, theme, innerCtx);
-        (context.state as any)._lsBashResultInner = child;
-      }
-      const collapsed = collapsedSummary(result, options, context, theme);
-      if (collapsed) return collapsed;
-      // Bash's renderResult uses lastComponent as a stateful render component
-      // (BashResultRenderComponent). We store the inner one and pass it back.
-      const inner = (context.state as any)._lsBashResultInner;
-      const innerCtx = { ...context, lastComponent: inner };
-      const child = bashDef.renderResult!(result, options, theme, innerCtx);
-      (context.state as any)._lsBashResultInner = child;
       const isPartial = options.isPartial;
       return new LeftStripWrapper(child, () =>
         isPartial
