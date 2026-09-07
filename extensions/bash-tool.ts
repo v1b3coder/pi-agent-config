@@ -3,16 +3,19 @@
  *
  * Split out of left-strip-tools.ts so the bash tool can be expanded
  * independently. Re-registers the built-in bash tool with renderShell: "self"
- * so the default Box background is bypassed, and wraps the built-in
- * renderCall/renderResult components in LeftStripWrapper, which prefixes every
- * line with a colored strip character. This preserves syntax highlighting,
- * truncation warnings, elapsed-time ticker, and key hints.
+ * so the default Box background is bypassed, and renders the tool block as a
+ * thin colored strip on the left edge of every line.
  *
- * Execution is delegated to the built-in createBashToolDefinition — no
- * behavior change. Results are collapsed by default to a one-line summary
- * (ctrl+o to expand); errors and streaming/partial results always render in
- * full — the latter also avoids interfering with the stateful inner renderer
- * (BashResultRenderComponent) that accumulates across partial updates.
+ * Tool signature: adds a required `description` parameter — a one-line
+ * summary of what the command does. The description replaces the
+ * "$ <command>" header when the result is collapsed, and is shown as a muted
+ * secondary line below the command when expanded (ctrl+o). Execution is
+ * delegated to the built-in createBashToolDefinition; the built-in
+ * renderResult (syntax highlighting, truncation warnings, elapsed-time
+ * ticker) is wrapped as-is. Errors and streaming/partial results always
+ * render in full — the latter also avoids interfering with the stateful inner
+ * renderer (BashResultRenderComponent) that accumulates across partial
+ * updates.
  *
  * Reload: /reload
  */
@@ -24,6 +27,7 @@ import type {
 import type { Component } from "@earendil-works/pi-tui";
 import { createBashToolDefinition } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth } from "@earendil-works/pi-tui";
+import { Type } from "typebox";
 
 // ---------------------------------------------------------------------------
 // Reusable component — applies theme background to only the first character
@@ -161,6 +165,21 @@ function collapsedSummary(
 }
 
 // ---------------------------------------------------------------------------
+// Tool parameters — built-in schema plus a required `description`
+// ---------------------------------------------------------------------------
+
+const bashSchema = Type.Object({
+  command: Type.String({ description: "Shell command to execute" }),
+  description: Type.String({
+    description:
+      "One-line description of what the command does (shown in the UI instead of the command when collapsed)",
+  }),
+  timeout: Type.Optional(
+    Type.Number({ description: "Timeout in seconds (optional, no default timeout)" }),
+  ),
+});
+
+// ---------------------------------------------------------------------------
 // Extension entry point
 // ---------------------------------------------------------------------------
 
@@ -172,24 +191,53 @@ export default async function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "bash",
     label: "bash",
-    description: bashDef.description,
+    description:
+      bashDef.description +
+      " Always provide a one-line description of what the command does.",
     promptSnippet: bashDef.promptSnippet,
-    promptGuidelines: bashDef.promptGuidelines,
-    parameters: bashDef.parameters,
+    promptGuidelines: [
+      ...(bashDef.promptGuidelines ?? []),
+      "Always provide a one-line description of what the bash command does",
+    ],
+    parameters: bashSchema,
     renderShell: "self",
 
     async execute(toolCallId, params, signal, onUpdate, ctx) {
-      return bashDef.execute(toolCallId, params, signal, onUpdate, ctx);
+      return bashDef.execute(
+        toolCallId,
+        { command: params.command, timeout: params.timeout },
+        signal,
+        onUpdate,
+        ctx,
+      );
     },
 
     renderCall(args, theme, context) {
-      const inner = (context.state as any)._lsBashCallInner;
-      const innerCtx = { ...context, lastComponent: inner };
-      const child = bashDef.renderCall!(args, theme, innerCtx);
-      (context.state as any)._lsBashCallInner = child;
-      return new LeftStripWrapper(child, () =>
-        pendingOrDoneColor(!context.isPartial, context.isError, theme),
-      );
+      const command = args?.command;
+      const description = args?.description;
+      // Collapsed header only when the result is finished, not an error, and
+      // not expanded — mirroring collapsedSummary's conditions.
+      const isCompact =
+        !context.isPartial && !context.isError && !context.expanded;
+      const bgFn = () =>
+        pendingOrDoneColor(!context.isPartial, context.isError, theme);
+      if (isCompact) {
+        // Compacted form: description replaces the "$ <command>" header.
+        const label = description || `$ ${command ?? ""}`;
+        return new LeftStripBlock([theme.fg("toolTitle", label)], bgFn);
+      }
+      // Expanded (or streaming/error): command header with the description
+      // as a secondary muted line below it.
+      const timeoutSuffix = args?.timeout
+        ? theme.fg("muted", ` (timeout ${args.timeout}s)`)
+        : "";
+      const lines = [
+        theme.fg("toolTitle", theme.bold(`$ ${command ?? ""}`)) + timeoutSuffix,
+      ];
+      if (description) {
+        lines.push(theme.fg("muted", `  ${description}`));
+      }
+      return new LeftStripBlock(lines, bgFn);
     },
 
     renderResult(result, options, theme, context) {
