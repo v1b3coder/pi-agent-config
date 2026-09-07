@@ -7,15 +7,15 @@
  * thin colored strip on the left edge of every line.
  *
  * Tool signature: adds a required `description` parameter — a one-line
- * summary of what the command does. The description is the dominant header
- * in both forms: compacted shows it alone (replacing "$ <command>"),
- * expanded shows it first with the command as a secondary muted line below.
- * Execution is delegated to the built-in createBashToolDefinition; the
- * built-in renderResult (syntax highlighting, truncation warnings,
- * elapsed-time ticker) is wrapped as-is. Errors and streaming/partial
- * results always render in full — the latter also avoids interfering with
- * the stateful inner renderer (BashResultRenderComponent) that accumulates
- * across partial updates.
+ * summary of what the command does. The description is the only header
+ * line unless the block is expanded (ctrl+o); the "$ <command>" line is
+ * shown only in expanded view, so the header never changes while the
+ * block runs or collapses. Execution is delegated to the built-in
+ * createBashToolDefinition; the built-in renderResult (syntax
+ * highlighting, truncation warnings, elapsed-time ticker) is wrapped
+ * as-is. Errors and streaming/partial results always render in full — the
+ * latter also avoids interfering with the stateful inner renderer
+ * (BashResultRenderComponent) that accumulates across partial updates.
  *
  * Reload: /reload
  */
@@ -235,31 +235,22 @@ export default async function (pi: ExtensionAPI) {
         state.startedAt = Date.now();
         state.endedAt = undefined;
       }
-      // Collapsed header only when the result is finished, not an error, and
-      // not expanded — mirroring collapsedSummary's conditions.
-      const isCompact =
-        !context.isPartial && !context.isError && !context.expanded;
       const bgFn = () =>
         pendingOrDoneColor(!context.isPartial, context.isError, theme);
       const timeoutSuffix = args?.timeout
         ? theme.fg("muted", ` (timeout ${args.timeout}s)`)
         : "";
-      // Description is the dominant header in both forms; in the expanded
-      // view the command follows as a secondary muted line.
-      if (description) {
-        const lines = [
-          theme.fg("toolTitle", theme.bold(description)) + timeoutSuffix,
-        ];
-        if (!isCompact) {
-          lines.push(theme.fg("muted", `  $ ${command ?? ""}`));
-        }
-        return new LeftStripBlock(lines, bgFn);
+      // The description is the only header line unless the block is expanded;
+      // the "$ <command>" line appears only in expanded view. This keeps the
+      // header identical while running and after collapse.
+      const lines = [
+        theme.fg("toolTitle", theme.bold(description || `$ ${command ?? ""}`)) +
+          timeoutSuffix,
+      ];
+      if (description && context.expanded) {
+        lines.push(theme.fg("muted", `  $ ${command ?? ""}`));
       }
-      // Fallback when description is missing: show the command as before.
-      return new LeftStripBlock(
-        [theme.fg("toolTitle", theme.bold(`$ ${command ?? ""}`)) + timeoutSuffix],
-        bgFn,
-      );
+      return new LeftStripBlock(lines, bgFn);
     },
 
     renderResult(result, options, theme, context) {
