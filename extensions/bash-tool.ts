@@ -150,18 +150,31 @@ function countOutputLines(result: {
 
 /**
  * Returns a one-line summary component when the result should be collapsed,
- * or null to signal the caller to render the full output.
+ * or null to signal the caller to render the full output. When `tookMs` is
+ * provided, the elapsed duration is included in the summary.
  */
 function collapsedSummary(
   result: { content: Array<{ type: string; text?: string }> },
   options: RenderResultOptions,
   context: Pick<RenderContext, "isError">,
   theme: Theme,
+  tookMs?: number,
 ): Component | null {
   if (options.expanded || options.isPartial || context.isError) return null;
   const n = countOutputLines(result);
-  const line = theme.fg("dim", `└ ${n} line${n === 1 ? "" : "s"} · ctrl+o to expand`);
+  const parts = [`└ ${n} line${n === 1 ? "" : "s"}`];
+  if (tookMs !== undefined) {
+    parts.push(`took ${(tookMs / 1000).toFixed(1)}s`);
+  }
+  parts.push("ctrl+o to expand");
+  const line = theme.fg("dim", parts.join(" · "));
   return new LeftStripBlock([line], () => resultBg(false, theme));
+}
+
+/** Elapsed duration (ms) from the renderer state, if execution started. */
+function tookMsFromState(state: any): number | undefined {
+  if (state?.startedAt === undefined) return undefined;
+  return (state.endedAt ?? Date.now()) - state.startedAt;
 }
 
 // ---------------------------------------------------------------------------
@@ -215,22 +228,33 @@ export default async function (pi: ExtensionAPI) {
     renderCall(args, theme, context) {
       const command = args?.command;
       const description = args?.description;
+      // Mirror the built-in renderCall: record execution start so the built-in
+      // renderResult can show Elapsed/Took and run its 1s ticker.
+      const state = context.state as any;
+      if (context.executionStarted && state.startedAt === undefined) {
+        state.startedAt = Date.now();
+        state.endedAt = undefined;
+      }
       // Collapsed header only when the result is finished, not an error, and
       // not expanded — mirroring collapsedSummary's conditions.
       const isCompact =
         !context.isPartial && !context.isError && !context.expanded;
       const bgFn = () =>
         pendingOrDoneColor(!context.isPartial, context.isError, theme);
-      if (isCompact) {
-        // Compacted form: description replaces the "$ <command>" header.
-        const label = description || `$ ${command ?? ""}`;
-        return new LeftStripBlock([theme.fg("toolTitle", label)], bgFn);
-      }
-      // Expanded (or streaming/error): command header with the description
-      // as a secondary muted line below it.
       const timeoutSuffix = args?.timeout
         ? theme.fg("muted", ` (timeout ${args.timeout}s)`)
         : "";
+      if (isCompact) {
+        // Compacted form: description replaces the "$ <command>" header;
+        // the timeout is still shown as a muted suffix.
+        const label = description || `$ ${command ?? ""}`;
+        return new LeftStripBlock(
+          [theme.fg("toolTitle", label) + timeoutSuffix],
+          bgFn,
+        );
+      }
+      // Expanded (or streaming/error): command header with the description
+      // as a secondary muted line below it.
       const lines = [
         theme.fg("toolTitle", theme.bold(`$ ${command ?? ""}`)) + timeoutSuffix,
       ];
@@ -252,7 +276,13 @@ export default async function (pi: ExtensionAPI) {
         const child = bashDef.renderResult!(result as any, options, theme, innerCtx);
         (context.state as any)._lsBashResultInner = child;
       }
-      const collapsed = collapsedSummary(result, options, context, theme);
+      const collapsed = collapsedSummary(
+        result,
+        options,
+        context,
+        theme,
+        tookMsFromState(context.state as any),
+      );
       if (collapsed) return collapsed;
       // Bash's renderResult uses lastComponent as a stateful render component
       // (BashResultRenderComponent). We store the inner one and pass it back.
