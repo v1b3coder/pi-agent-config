@@ -13,12 +13,15 @@
  * block runs or collapses. While the model is still streaming the tool-call
  * arguments the description may not have arrived yet — a neutral "…"
  * placeholder is shown instead, so the command never flashes in collapsed
- * view. Execution is delegated to the built-in
- * createBashToolDefinition; the built-in renderResult (syntax
- * highlighting, truncation warnings, elapsed-time ticker) is wrapped
- * as-is. Errors and streaming/partial results always render in full — the
- * latter also avoids interfering with the stateful inner renderer
- * (BashResultRenderComponent) that accumulates across partial updates.
+ * view. Once the arguments are final (argsComplete) a missing description
+ * is a schema violation: the header then shows the command as a stable
+ * fallback (no further arg updates, so no rewrite flicker). Execution is
+ * delegated to the built-in createBashToolDefinition; the built-in
+ * renderResult (syntax highlighting, truncation warnings, elapsed-time
+ * ticker) is wrapped as-is. Errors and streaming/partial results always
+ * render in full — the latter also avoids interfering with the stateful
+ * inner renderer (BashResultRenderComponent) that accumulates across
+ * partial updates.
  *
  * Reload: /reload
  */
@@ -246,13 +249,16 @@ export default async function (pi: ExtensionAPI) {
       // The description is the only header line unless the block is expanded;
       // the "$ <command>" line appears only in expanded view. This keeps the
       // header identical while running and after collapse. While the tool-call
-      // arguments are still streaming, the description may not have arrived
-      // yet — show a neutral placeholder instead of falling back to the
-      // command, so the command never flashes and then gets rewritten.
+      // arguments are still streaming (argsComplete=false), the description
+      // may not have arrived yet — show a neutral placeholder instead of
+      // falling back to the command, so the command never flashes and then
+      // gets rewritten. Only once the arguments are final (argsComplete) do
+      // we fall back to the command, which is stable (no further arg updates)
+      // and useful for the schema-violation case.
       const lines = [
         (description
           ? theme.fg("toolTitle", theme.bold(description))
-          : context.expanded
+          : context.argsComplete
             ? theme.fg("toolTitle", theme.bold(`$ ${command ?? ""}`))
             : theme.fg("muted", "…")) + timeoutSuffix,
       ];
