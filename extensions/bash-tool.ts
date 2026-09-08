@@ -10,7 +10,10 @@
  * summary of what the command does. The description is the only header
  * line unless the block is expanded (ctrl+o); the "$ <command>" line is
  * shown only in expanded view, so the header never changes while the
- * block runs or collapses. Execution is delegated to the built-in
+ * block runs or collapses. While the model is still streaming the tool-call
+ * arguments the description may not have arrived yet — a neutral "…"
+ * placeholder is shown instead, so the command never flashes in collapsed
+ * view. Execution is delegated to the built-in
  * createBashToolDefinition; the built-in renderResult (syntax
  * highlighting, truncation warnings, elapsed-time ticker) is wrapped
  * as-is. Errors and streaming/partial results always render in full — the
@@ -242,10 +245,16 @@ export default async function (pi: ExtensionAPI) {
         : "";
       // The description is the only header line unless the block is expanded;
       // the "$ <command>" line appears only in expanded view. This keeps the
-      // header identical while running and after collapse.
+      // header identical while running and after collapse. While the tool-call
+      // arguments are still streaming, the description may not have arrived
+      // yet — show a neutral placeholder instead of falling back to the
+      // command, so the command never flashes and then gets rewritten.
       const lines = [
-        theme.fg("toolTitle", theme.bold(description || `$ ${command ?? ""}`)) +
-          timeoutSuffix,
+        (description
+          ? theme.fg("toolTitle", theme.bold(description))
+          : context.expanded
+            ? theme.fg("toolTitle", theme.bold(`$ ${command ?? ""}`))
+            : theme.fg("muted", "…")) + timeoutSuffix,
       ];
       if (description && context.expanded) {
         lines.push(theme.fg("muted", `  $ ${command ?? ""}`));
