@@ -187,12 +187,18 @@ function tookMsFromState(state: any): number | undefined {
 // Tool parameters — built-in schema plus a required `description`
 // ---------------------------------------------------------------------------
 
+// `description` is declared before `command` on purpose: pi passes this
+// TypeBox schema straight through as the provider's tool input_schema, and
+// models generally emit tool-call JSON properties in schema order. Streaming
+// the description first means the compacted header shows the description
+// (not a placeholder) before the command even arrives — and the command is
+// only ever rendered in expanded view.
 const bashSchema = Type.Object({
-  command: Type.String({ description: "Shell command to execute" }),
   description: Type.String({
     description:
       "One-line description of what the command does (shown in the UI instead of the command when collapsed)",
   }),
+  command: Type.String({ description: "Shell command to execute" }),
   timeout: Type.Optional(
     Type.Number({ description: "Timeout in seconds (optional, no default timeout)" }),
   ),
