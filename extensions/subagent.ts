@@ -10,7 +10,8 @@ import {
   ToolExecutionComponent,
 } from "@earendil-works/pi-coding-agent";
 import { keyHint } from "@earendil-works/pi-coding-agent";
-import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
+import { isContextOverflow } from "@earendil-works/pi-ai/compat";
 import { Type } from "typebox";
 import { join } from "node:path";
 
@@ -457,64 +458,68 @@ const AGENT_NAMES = Object.keys(AGENTS);
 async function spawnChild(
   agentName: string,
   task: string,
-  cwd: string,
+  ctx: ExtensionContext,
   signal: AbortSignal | undefined,
   state: AgentState,
+  thinkingLevel: NonNullable<Parameters<typeof createAgentSession>[0]>["thinkingLevel"],
   onTick?: () => void,
 ): Promise<string> {
   const def = AGENTS[agentName];
   if (!def) throw new Error(`Unknown agent: ${agentName}`);
 
   const agentDir = getAgentDir();
-  const settingsManager = SettingsManager.create(cwd, agentDir);
+  const settingsManager = SettingsManager.create(ctx.cwd, agentDir);
 
-  const resourceLoader = new DefaultResourceLoader({ cwd, agentDir, settingsManager });
-  await resourceLoader.reload();
-
-  // Apply provider registrations queued by extensions (e.g. litellm.ts) to a
-  // canonical ModelRuntime and pass it explicitly. Must happen BEFORE
-  // createAgentSession: AgentSession constructs its ExtensionRunner (which
-  // would flush the same queue) only after findInitialModel has already
-  // picked the default model — too late for settings defaultProvider=litellm.
-  const modelRuntime = await ModelRuntime.create({
-    authPath: join(agentDir, "auth.json"),
-    modelsPath: join(agentDir, "models.json"),
-  });
-  const extResult = resourceLoader.getExtensions();
-  for (const { name, config } of extResult.runtime.pendingProviderRegistrations) {
-    modelRuntime.registerProvider(name, config);
-  }
-  extResult.runtime.pendingProviderRegistrations = [];
-
+  // Mark the child BEFORE reloading resources so the subagent extension's own
+  // factory (and any other extension honoring the marker) skips registration.
+  // Ref-counted so parallel children keep the marker until the last one exits.
   subagentChildCount++;
   process.env[SUBAGENT_CHILD_ENV] = "1";
+
+  // Extensions are NOT loaded into the child. Extension factories hold
+  // module-level state and register on a shared runtime, so binding the full set
+  // inside a second in-process session corrupts the PARENT session's extensions.
+  // Only the built-in tools are needed for subagent work.
+  const resourceLoader = new DefaultResourceLoader({
+    cwd: ctx.cwd,
+    agentDir,
+    settingsManager,
+    noExtensions: true,
+  });
+
   try {
-    // ═══════════════════════════════════════════════════════════════════
-    // Retry compatibility with tool-call-revert extension
-    // ═══════════════════════════════════════════════════════════════════
-    //
-    // The resourceLoader loads global extensions from ~/.pi/agent/extensions/
-    // into every child session. If tool-call-revert.ts is installed, it
-    // automatically handles malformed tool calls (e.g. DeepSeek DSML text
-    // blocks) inside child sessions by reverting the bad response and
-    // retrying the prompt — transparently, before this spawnChild function
-    // sees the result.
-    //
-    // The subagent tool itself (in the parent session) does NOT add its own
-    // retry loop. Instead, it relies on tool-call-revert at the SDK level
-    // inside each child session. If tool-call-revert is NOT installed,
-    // child sessions get exactly one attempt per task.
-    //
-    // See: extensions/tool-call-revert.ts
-    // ═══════════════════════════════════════════════════════════════════
+    await resourceLoader.reload();
+
+    // The child loader skips extensions, so the parent's registered extension
+    // providers (e.g. litellm) are the only source of provider/auth config.
+    // Re-register them on the child's canonical ModelRuntime BEFORE
+    // createAgentSession resolves the model, otherwise findInitialModel cannot
+    // see the parent's provider and silently falls back to another provider.
+    const modelRuntime = await ModelRuntime.create({
+      authPath: join(agentDir, "auth.json"),
+      modelsPath: join(agentDir, "models.json"),
+    });
+    for (const id of ctx.modelRegistry.getRegisteredProviderIds()) {
+      const config = ctx.modelRegistry.getRegisteredProviderConfig(id);
+      if (config) modelRuntime.registerProvider(id, config);
+    }
+    // Extensions (incl. tool-call-revert) are not loaded into the child, so
+    // child sessions get exactly one attempt per task. Keep the child on the
+    // parent's model so its context budget matches the parent's.
 
     const { session } = await createAgentSession({
-      cwd,
+      cwd: ctx.cwd,
       agentDir,
+      // Run on the parent's model, NOT the settings default: a stale or absent
+      // default silently resolves to an unrelated provider with a smaller context
+      // window (observed: openai/gpt-5.5 272K instead of litellm/beast/big
+      // 1M), which overflows on context-hungry tasks.
+      model: ctx.model,
+      thinkingLevel,
       tools: def.tools,
       modelRuntime,
       resourceLoader,
-      sessionManager: SessionManager.inMemory(cwd),
+      sessionManager: SessionManager.inMemory(ctx.cwd),
       settingsManager,
     });
 
@@ -530,6 +535,10 @@ async function spawnChild(
     // assistant messages (thinking + text) and tool executions as blocks.
     // The value returned to the parent model stays the assistant text only.
     let finalText = "";
+    // Set when the child's model reports a context-window overflow. pi's own
+    // overflow recovery re-summarizes the same oversized context and fails the
+    // same way, so stop the run and report it to the orchestrator instead.
+    let overflowError: string | undefined;
 
     const lastAssistantBlock = (): AssistantBlock | undefined => {
       for (let i = state.blocks.length - 1; i >= 0; i--) {
@@ -567,6 +576,13 @@ async function spawnChild(
           block.message = ev.message as AssistantMsg;
           block.streaming = false;
           block.version++;
+        }
+        const msg = ev.message as { stopReason?: string; errorMessage?: string };
+        if (msg.stopReason === "error" && msg.errorMessage &&
+            isContextOverflow(msg as Parameters<typeof isContextOverflow>[0], ctx.model?.contextWindow ?? 0)) {
+          overflowError = msg.errorMessage;
+          session.abortCompaction();
+          void session.abort();
         }
         finalText += (ev.message.content as { type: string; text?: string }[])
           .filter((c) => c.type === "text")
@@ -606,6 +622,16 @@ async function spawnChild(
 
     try {
       await session.prompt(`${def.systemPrompt}\n\nTask: ${task}`);
+      if (overflowError) {
+        return [
+          `Subagent "${agentName}" stopped: its model ran out of context.`,
+          `Model: ${ctx.model?.provider}/${ctx.model?.id} (context window ${ctx.model?.contextWindow ?? "?"} tokens).`,
+          `Error: ${overflowError}`,
+          "",
+          "The task was too large for one subagent call. Split it into",
+          "smaller chunks (narrower file/area scope per call) and retry.",
+        ].join("\n");
+      }
       // Fallback: if no message_end text was captured (e.g. unusual event
       // ordering), assemble the answer from the assistant blocks.
       if (!finalText.trim()) {
@@ -797,7 +823,7 @@ export default function (pi: ExtensionAPI) {
         tasks.map(async (t, i) => {
           const key = taskKeys[i]!;
           try {
-            return await spawnChild(t.agent, t.task, ctx.cwd, signal, agentStates.get(key)!, () => {
+            return await spawnChild(t.agent, t.task, ctx, signal, agentStates.get(key)!, pi.getThinkingLevel(), () => {
               // Throttle widget updates to ~150ms intervals
               const now = Date.now();
               if (now - lastWidgetUpdate > 150) {
