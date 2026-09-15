@@ -528,7 +528,11 @@ async function spawnChild(
       session.dispose();
       throw new Error("cancelled before start");
     }
-    const killSession = () => { void session.abort(); };
+    const killSession = () => {
+      // abort() stops the current run/retry but NOT auto-compaction.
+      session.abortCompaction();
+      void session.abort();
+    };
     signal?.addEventListener("abort", killSession, { once: true });
 
     // Structured transcript for the full-screen viewer and widget:
@@ -623,14 +627,30 @@ async function spawnChild(
     try {
       await session.prompt(`${def.systemPrompt}\n\nTask: ${task}`);
       if (overflowError) {
-        return [
+        throw new Error([
           `Subagent "${agentName}" stopped: its model ran out of context.`,
           `Model: ${ctx.model?.provider}/${ctx.model?.id} (context window ${ctx.model?.contextWindow ?? "?"} tokens).`,
-          `Error: ${overflowError}`,
+          overflowError,
           "",
           "The task was too large for one subagent call. Split it into",
           "smaller chunks (narrower file/area scope per call) and retry.",
-        ].join("\n");
+        ].join("\n"));
+      }
+      // prompt() can resolve before overflow/threshold compaction+retry
+      // finishes (pi flips isStreaming silently), so wait for the child to be
+      // fully idle before reading the transcript and disposing the session.
+      // Otherwise the child is disposed mid-compaction and the result is
+      // truncated or empty.
+      while (
+        session.isStreaming ||
+        session.isCompacting ||
+        session.isRetrying ||
+        session.pendingMessageCount > 0 ||
+        session.isBashRunning ||
+        session.hasPendingBashMessages
+      ) {
+        if (signal?.aborted) break;
+        await new Promise((resolve) => setTimeout(resolve, 50));
       }
       // Fallback: if no message_end text was captured (e.g. unusual event
       // ordering), assemble the answer from the assistant blocks.
@@ -823,7 +843,7 @@ export default function (pi: ExtensionAPI) {
         tasks.map(async (t, i) => {
           const key = taskKeys[i]!;
           try {
-            return await spawnChild(t.agent, t.task, ctx, signal, agentStates.get(key)!, pi.getThinkingLevel(), () => {
+            const text = await spawnChild(t.agent, t.task, ctx, signal, agentStates.get(key)!, pi.getThinkingLevel(), () => {
               // Throttle widget updates to ~150ms intervals
               const now = Date.now();
               if (now - lastWidgetUpdate > 150) {
@@ -831,10 +851,11 @@ export default function (pi: ExtensionAPI) {
                 updateWidget();
               }
             });
+            return { text, isError: false };
           } catch (err) {
             const state = agentStates.get(key);
             if (state) state.status = "error";
-            return `Error: ${err instanceof Error ? err.message : String(err)}`;
+            return { text: `Error: ${err instanceof Error ? err.message : String(err)}`, isError: true };
           }
         }),
       );
@@ -858,13 +879,13 @@ export default function (pi: ExtensionAPI) {
       for (let i = 0; i < tasks.length; i++) {
         const header = `── ${tasks[i]!.agent} (${tasks[i]!.task.slice(0, 60)}) ──`;
         lines.push(header);
-        lines.push(results[i] || "(no output)");
+        lines.push(results[i]!.text || "(no output)");
         lines.push("");
       }
 
       return {
         content: [{ type: "text", text: lines.join("\n").trim() || "(no output)" }],
-        isError: false,
+        isError: results.some((r) => r.isError),
         details: {},
       };
     },
