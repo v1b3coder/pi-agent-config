@@ -446,7 +446,7 @@ const AGENTS: Record<string, AgentDef> = {
     tools: ["read", "grep", "find", "ls", "bash", "edit", "write"],
     systemPrompt:
       `You are a delegate subagent.\n` +
-      `You have the same capabilities as the parent session.\n` +
+      `You have the same built-in tools as the parent session.\n` +
       `Complete the assigned task with whatever tools are appropriate.`,
   },
 };
@@ -466,6 +466,12 @@ async function spawnChild(
 ): Promise<string> {
   const def = AGENTS[agentName];
   if (!def) throw new Error(`Unknown agent: ${agentName}`);
+  // Inherit the parent's model by default. If the parent has none there is no
+  // model to inherit, so fail fast instead of letting findInitialModel silently
+  // resolve an unrelated provider with a different context window.
+  if (!ctx.model) {
+    throw new Error(`No model available for subagent "${agentName}": the parent session has no active model.`);
+  }
 
   const agentDir = getAgentDir();
   const settingsManager = SettingsManager.create(ctx.cwd, agentDir);
@@ -582,13 +588,19 @@ async function spawnChild(
           block.version++;
         }
         const msg = ev.message as { stopReason?: string; errorMessage?: string };
-        if (msg.stopReason === "error" && msg.errorMessage &&
+        // isContextOverflow also covers a `length` stop that was cut off by the
+        // window (no errorMessage) — treat it as an overflow too. A `stop` stop
+        // that merely exceeded the window produced a valid answer, so keep it.
+        if (msg.stopReason !== "stop" &&
             isContextOverflow(msg as Parameters<typeof isContextOverflow>[0], ctx.model?.contextWindow ?? 0)) {
-          overflowError = msg.errorMessage;
+          overflowError = msg.errorMessage
+            ?? `The response was cut off by the model's context window (${ctx.model?.contextWindow ?? "?"} tokens).`;
           session.abortCompaction();
           void session.abort();
         }
-        finalText += (ev.message.content as { type: string; text?: string }[])
+        // Keep only the LAST assistant message's text — the final answer, not
+        // every intermediate "let me inspect…" preamble.
+        finalText = (ev.message.content as { type: string; text?: string }[])
           .filter((c) => c.type === "text")
           .map((c) => c.text ?? "")
           .join("");
@@ -655,16 +667,17 @@ async function spawnChild(
       // Fallback: if no message_end text was captured (e.g. unusual event
       // ordering), assemble the answer from the assistant blocks.
       if (!finalText.trim()) {
-        finalText = state.blocks
-          .filter((b): b is AssistantBlock => b.kind === "assistant")
-          .map((b) =>
-            ((b.message?.content as { type: string; text?: string }[] | undefined) ?? [])
-              .filter((c) => c.type === "text")
-              .map((c) => c.text ?? "")
-              .join(""),
-          )
-          .filter((t) => t.trim())
-          .join("\n\n");
+        // No message_end captured: use the LAST assistant block's text, matching
+        // pi's lastAssistantText, rather than joining every block's preamble.
+        for (let i = state.blocks.length - 1; i >= 0; i--) {
+          const b = state.blocks[i]!;
+          if (b.kind !== "assistant") continue;
+          finalText = ((b.message?.content as { type: string; text?: string }[] | undefined) ?? [])
+            .filter((c) => c.type === "text")
+            .map((c) => c.text ?? "")
+            .join("");
+          break;
+        }
       }
       return finalText.trim();
     } finally {
@@ -919,7 +932,10 @@ export default function (pi: ExtensionAPI) {
         );
       }
 
-      const full = result.content?.[0]?.type === "text" ? result.content[0].text : "";
+      const full = (result.content ?? [])
+        .filter((c) => c.type === "text")
+        .map((c) => (c as { type: "text"; text: string }).text)
+        .join("\n");
       const n = full.split("\n").length;
 
       if (!options.expanded && !context.isError) {
