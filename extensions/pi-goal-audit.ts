@@ -113,7 +113,7 @@ function makeAuditorLoader(): ResourceLoader {
 
 
 
-async function runAuditor(ctx: ExtensionContext, state: GoalState, claim: string, signal?: AbortSignal): Promise<{ approved: boolean; output: string; error?: string }> {
+async function runAuditor(ctx: ExtensionContext, state: GoalState, claim: string, thinkingLevel: NonNullable<Parameters<typeof createAgentSession>[0]>["thinkingLevel"], signal?: AbortSignal): Promise<{ approved: boolean; output: string; error?: string }> {
 	const parts: string[] = [];
 	const AUDITOR_STATUS_KEY = "pi-goal-auditor-stream";
 	let notifyTimer: ReturnType<typeof setTimeout> | null = null;
@@ -143,6 +143,7 @@ async function runAuditor(ctx: ExtensionContext, state: GoalState, claim: string
 		const { session } = await createAgentSession({
 			cwd: ctx.cwd,
 			model: ctx.model,
+			thinkingLevel,
 			modelRuntime,
 			resourceLoader: makeAuditorLoader(),
 			sessionManager: SessionManager.inMemory(ctx.cwd),
@@ -283,7 +284,7 @@ export default function piGoalAudit(pi: ExtensionAPI) {
 
 			let auditorResult: { approved: boolean; output: string; error?: string };
 			try {
-				auditorResult = await runAuditor(ctx, goal, completionSummary, abortController.signal);
+				auditorResult = await runAuditor(ctx, goal, completionSummary, pi.getThinkingLevel(), abortController.signal);
 			} finally {
 				unsubTerminal?.();
 			}
