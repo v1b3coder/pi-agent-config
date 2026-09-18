@@ -4,17 +4,19 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
  * Per-turn prefill & decode speed widget for pi-footer.
  *
  * Measures raw model throughput per LLM turn:
- *   - Prefill speed  = (input_tokens - cache_read) / time_to_first_token  (tok/s)
- *   - Decode speed   = output_tokens / generation_time                   (tok/s)
+ *   - Prefill speed  = input_tokens / time_to_first_token  (tok/s)
+ *   - Decode speed   = output_tokens / generation_time     (tok/s)
  *
- * Time-to-first-token is anchored on the first streamed token (message_update),
- * and prefill counts the full prompt minus the cached prefix (cacheRead): TTFT
- * covers processing the entire prompt, not just the tokens added this turn.
+ * Time-to-first-token is anchored on the first streamed token (message_update).
+ * pi normalizes `usage.input` to the *non-cached* prompt tokens for every
+ * provider (OpenAI-compatible: prompt_tokens - cacheRead - cacheWrite;
+ * Anthropic/Google report the cached part separately), so prefill must NOT
+ * subtract cacheRead again — doing so yields a negative number and no prefill.
  *
  * While a response is streaming the widget is refreshed every LIVE_INTERVAL_MS
  * (5 s) so long turns show progress before they finish:
- *   - Prefill uses the provider-reported input/cacheRead tokens, which land at
- *     the start of the stream, and the already-fixed time-to-first-token.
+ *   - Prefill uses the provider-reported non-cached input tokens, which land
+ *     at the start of the stream, and the already-fixed time-to-first-token.
  *   - Decode uses the running generation time since the first token and a live
  *     output-token estimate (streamed chars / 4), because most providers only
  *     report exact output usage at the end of the stream.
@@ -47,7 +49,6 @@ let firstTokenTime = 0;
 // Live streaming state
 let liveOutputChars = 0;
 let liveInputTokens = 0;
-let liveCacheReadTokens = 0;
 let liveTimer: ReturnType<typeof setInterval> | null = null;
 
 // Store last values so we only emit when something actually changed
@@ -102,9 +103,9 @@ function emitLive(pi: ExtensionAPI): void {
   if (firstTokenTime === 0) return;
   const now = performance.now();
 
-  // Prefill: TTFT covers processing the whole prompt, minus the cached prefix
+  // Prefill: usage.input is already the non-cached prompt token count
   if (turnStart > 0) {
-    const prefilled = Math.max(0, liveInputTokens - liveCacheReadTokens);
+    const prefilled = liveInputTokens;
     const ttftMs = firstTokenTime - turnStart;
     if (ttftMs > 0 && prefilled > 0) {
       lastPrefillSpeed = prefilled / (ttftMs / 1000);
@@ -131,7 +132,6 @@ export default function (pi: ExtensionAPI): void {
     firstTokenTime = 0;
     liveOutputChars = 0;
     liveInputTokens = 0;
-    liveCacheReadTokens = 0;
     stopLiveTimer();
   });
 
@@ -145,13 +145,12 @@ export default function (pi: ExtensionAPI): void {
     }
 
     // The partial message's usage object is mutated in place by the provider,
-    // so input/cacheRead may appear as soon as streaming starts.
+    // so the non-cached input count may appear as soon as streaming starts.
     const msg = event.message as {
-      usage?: { input?: number; cacheRead?: number };
+      usage?: { input?: number };
     };
     if (msg.usage) {
       liveInputTokens = msg.usage.input ?? 0;
-      liveCacheReadTokens = msg.usage.cacheRead ?? 0;
     }
 
     const delta = (event.assistantMessageEvent as { delta?: unknown })?.delta;
@@ -172,19 +171,17 @@ export default function (pi: ExtensionAPI): void {
     stopLiveTimer();
     liveOutputChars = 0;
     liveInputTokens = 0;
-    liveCacheReadTokens = 0;
 
     const now = performance.now();
     const msg = event.message as {
-      usage?: { input: number; output: number; cacheRead: number };
+      usage?: { input: number; output: number };
     };
     const inputTokens = msg.usage?.input ?? 0;
     const outputTokens = msg.usage?.output ?? 0;
-    const cacheRead = msg.usage?.cacheRead ?? 0;
 
-    // Prefill speed: TTFT covers processing the whole prompt, minus cached prefix
+    // Prefill speed: usage.input is already the non-cached prompt token count
     if (turnStart > 0 && firstTokenTime > 0) {
-      const prefilled = Math.max(0, inputTokens - cacheRead);
+      const prefilled = inputTokens;
       const ttftMs = firstTokenTime - turnStart;
       if (ttftMs > 0 && prefilled > 0) {
         lastPrefillSpeed = prefilled / (ttftMs / 1000);
