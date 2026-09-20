@@ -53,6 +53,21 @@ run_step() { # run_step <label> <cmd...>
   fi
 }
 
+# pi rewrites settings.json's lastChangelogVersion on every update. That bump is
+# expected and never worth keeping, so reset just that line to the committed
+# value and leave any other local edits in the file untouched.
+discard_changelog_bump() {
+  local file="settings.json" head_line cur_line escaped
+  git ls-files --error-unmatch -- "$file" >/dev/null 2>&1 || return 0
+  head_line="$(git show "HEAD:$file" 2>/dev/null | grep -m1 '"lastChangelogVersion"')"
+  [ -n "$head_line" ] || return 0
+  cur_line="$(grep -m1 '"lastChangelogVersion"' "$file" 2>/dev/null)"
+  [ "$cur_line" = "$head_line" ] && return 0
+  escaped="$(printf '%s' "$head_line" | sed 's/[&/\\]/\\&/g')"
+  sed -i "s|^.*\"lastChangelogVersion\".*$|$escaped|" "$file"
+  printf '%sDiscarded local lastChangelogVersion bump (expected).%s\n' "$DIM" "$RESET"
+}
+
 # --- 0. sanity -------------------------------------------------------------
 if ! command -v pi >/dev/null 2>&1; then
   warn "pi not found on PATH — is it installed?"
@@ -72,6 +87,8 @@ run_step "Updating pi itself" pi update --self
 run_step "Updating extensions (pi packages)" pi update --extensions
 
 # --- 3. local changes in tracked files -------------------------------------
+discard_changelog_bump
+
 skip_pull=0
 if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
   echo

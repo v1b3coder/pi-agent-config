@@ -10,12 +10,18 @@
  * summary of what the command does. The description is the only header
  * line unless the block is expanded (ctrl+o); the "$ <command>" line is
  * shown only in expanded view, so the header never changes while the
- * block runs or collapses. Execution is delegated to the built-in
- * createBashToolDefinition; the built-in renderResult (syntax
- * highlighting, truncation warnings, elapsed-time ticker) is wrapped
- * as-is. Errors and streaming/partial results always render in full — the
- * latter also avoids interfering with the stateful inner renderer
- * (BashResultRenderComponent) that accumulates across partial updates.
+ * block runs or collapses. While the model is still streaming the tool-call
+ * arguments the description may not have arrived yet — a neutral "…"
+ * placeholder is shown instead, so the command never flashes in collapsed
+ * view. Once the arguments are final (argsComplete) a missing description
+ * is a schema violation: the header then shows the command as a stable
+ * fallback (no further arg updates, so no rewrite flicker). Execution is
+ * delegated to the built-in createBashToolDefinition; the built-in
+ * renderResult (syntax highlighting, truncation warnings, elapsed-time
+ * ticker) is wrapped as-is. Errors and streaming/partial results always
+ * render in full — the latter also avoids interfering with the stateful
+ * inner renderer (BashResultRenderComponent) that accumulates across
+ * partial updates.
  *
  * Reload: /reload
  */
@@ -181,12 +187,18 @@ function tookMsFromState(state: any): number | undefined {
 // Tool parameters — built-in schema plus a required `description`
 // ---------------------------------------------------------------------------
 
+// `description` is declared before `command` on purpose: pi passes this
+// TypeBox schema straight through as the provider's tool input_schema, and
+// models generally emit tool-call JSON properties in schema order. Streaming
+// the description first means the compacted header shows the description
+// (not a placeholder) before the command even arrives — and the command is
+// only ever rendered in expanded view.
 const bashSchema = Type.Object({
-  command: Type.String({ description: "Shell command to execute" }),
   description: Type.String({
     description:
       "One-line description of what the command does (shown in the UI instead of the command when collapsed)",
   }),
+  command: Type.String({ description: "Shell command to execute" }),
   timeout: Type.Optional(
     Type.Number({ description: "Timeout in seconds (optional, no default timeout)" }),
   ),
@@ -242,10 +254,19 @@ export default async function (pi: ExtensionAPI) {
         : "";
       // The description is the only header line unless the block is expanded;
       // the "$ <command>" line appears only in expanded view. This keeps the
-      // header identical while running and after collapse.
+      // header identical while running and after collapse. While the tool-call
+      // arguments are still streaming (argsComplete=false), the description
+      // may not have arrived yet — show a neutral placeholder instead of
+      // falling back to the command, so the command never flashes and then
+      // gets rewritten. Only once the arguments are final (argsComplete) do
+      // we fall back to the command, which is stable (no further arg updates)
+      // and useful for the schema-violation case.
       const lines = [
-        theme.fg("toolTitle", theme.bold(description || `$ ${command ?? ""}`)) +
-          timeoutSuffix,
+        (description
+          ? theme.fg("toolTitle", theme.bold(description))
+          : context.argsComplete
+            ? theme.fg("toolTitle", theme.bold(`$ ${command ?? ""}`))
+            : theme.fg("muted", "…")) + timeoutSuffix,
       ];
       if (description && context.expanded) {
         lines.push(theme.fg("muted", `  $ ${command ?? ""}`));

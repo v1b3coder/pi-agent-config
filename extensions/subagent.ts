@@ -10,7 +10,8 @@ import {
   ToolExecutionComponent,
 } from "@earendil-works/pi-coding-agent";
 import { keyHint } from "@earendil-works/pi-coding-agent";
-import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
+import { isContextOverflow } from "@earendil-works/pi-ai/compat";
 import { Type } from "typebox";
 import { join } from "node:path";
 
@@ -445,7 +446,7 @@ const AGENTS: Record<string, AgentDef> = {
     tools: ["read", "grep", "find", "ls", "bash", "edit", "write"],
     systemPrompt:
       `You are a delegate subagent.\n` +
-      `You have the same capabilities as the parent session.\n` +
+      `You have the same built-in tools as the parent session.\n` +
       `Complete the assigned task with whatever tools are appropriate.`,
   },
 };
@@ -457,64 +458,74 @@ const AGENT_NAMES = Object.keys(AGENTS);
 async function spawnChild(
   agentName: string,
   task: string,
-  cwd: string,
+  ctx: ExtensionContext,
   signal: AbortSignal | undefined,
   state: AgentState,
+  thinkingLevel: NonNullable<Parameters<typeof createAgentSession>[0]>["thinkingLevel"],
   onTick?: () => void,
 ): Promise<string> {
   const def = AGENTS[agentName];
   if (!def) throw new Error(`Unknown agent: ${agentName}`);
+  // Inherit the parent's model by default. If the parent has none there is no
+  // model to inherit, so fail fast instead of letting findInitialModel silently
+  // resolve an unrelated provider with a different context window.
+  if (!ctx.model) {
+    throw new Error(`No model available for subagent "${agentName}": the parent session has no active model.`);
+  }
 
   const agentDir = getAgentDir();
-  const settingsManager = SettingsManager.create(cwd, agentDir);
+  const settingsManager = SettingsManager.create(ctx.cwd, agentDir);
 
-  const resourceLoader = new DefaultResourceLoader({ cwd, agentDir, settingsManager });
-  await resourceLoader.reload();
-
-  // Apply provider registrations queued by extensions (e.g. litellm.ts) to a
-  // canonical ModelRuntime and pass it explicitly. Must happen BEFORE
-  // createAgentSession: AgentSession constructs its ExtensionRunner (which
-  // would flush the same queue) only after findInitialModel has already
-  // picked the default model — too late for settings defaultProvider=litellm.
-  const modelRuntime = await ModelRuntime.create({
-    authPath: join(agentDir, "auth.json"),
-    modelsPath: join(agentDir, "models.json"),
-  });
-  const extResult = resourceLoader.getExtensions();
-  for (const { name, config } of extResult.runtime.pendingProviderRegistrations) {
-    modelRuntime.registerProvider(name, config);
-  }
-  extResult.runtime.pendingProviderRegistrations = [];
-
+  // Mark the child BEFORE reloading resources so the subagent extension's own
+  // factory (and any other extension honoring the marker) skips registration.
+  // Ref-counted so parallel children keep the marker until the last one exits.
   subagentChildCount++;
   process.env[SUBAGENT_CHILD_ENV] = "1";
+
+  // Extensions are NOT loaded into the child. Extension factories hold
+  // module-level state and register on a shared runtime, so binding the full set
+  // inside a second in-process session corrupts the PARENT session's extensions.
+  // Only the built-in tools are needed for subagent work.
+  const resourceLoader = new DefaultResourceLoader({
+    cwd: ctx.cwd,
+    agentDir,
+    settingsManager,
+    noExtensions: true,
+  });
+
   try {
-    // ═══════════════════════════════════════════════════════════════════
-    // Retry compatibility with tool-call-revert extension
-    // ═══════════════════════════════════════════════════════════════════
-    //
-    // The resourceLoader loads global extensions from ~/.pi/agent/extensions/
-    // into every child session. If tool-call-revert.ts is installed, it
-    // automatically handles malformed tool calls (e.g. DeepSeek DSML text
-    // blocks) inside child sessions by reverting the bad response and
-    // retrying the prompt — transparently, before this spawnChild function
-    // sees the result.
-    //
-    // The subagent tool itself (in the parent session) does NOT add its own
-    // retry loop. Instead, it relies on tool-call-revert at the SDK level
-    // inside each child session. If tool-call-revert is NOT installed,
-    // child sessions get exactly one attempt per task.
-    //
-    // See: extensions/tool-call-revert.ts
-    // ═══════════════════════════════════════════════════════════════════
+    await resourceLoader.reload();
+
+    // The child loader skips extensions, so the parent's registered extension
+    // providers (e.g. litellm) are the only source of provider/auth config.
+    // Re-register them on the child's canonical ModelRuntime BEFORE
+    // createAgentSession resolves the model, otherwise findInitialModel cannot
+    // see the parent's provider and silently falls back to another provider.
+    const modelRuntime = await ModelRuntime.create({
+      authPath: join(agentDir, "auth.json"),
+      modelsPath: join(agentDir, "models.json"),
+    });
+    for (const id of ctx.modelRegistry.getRegisteredProviderIds()) {
+      const config = ctx.modelRegistry.getRegisteredProviderConfig(id);
+      if (config) modelRuntime.registerProvider(id, config);
+    }
+    // Extensions (incl. tool-call-revert) are not loaded into the child, so
+    // child sessions get exactly one attempt per task. Keep the child on the
+    // parent's model so its context budget matches the parent's.
 
     const { session } = await createAgentSession({
-      cwd,
+      cwd: ctx.cwd,
       agentDir,
+      // Run on the parent's model, NOT the settings default: a stale or absent
+      // default silently resolves to an unrelated provider with a smaller context
+      // window (observed: openai/gpt-5.5 272K instead of litellm/beast/big
+      // 1M), which overflows on context-hungry tasks.
+      model: ctx.model,
+      thinkingLevel,
       tools: def.tools,
       modelRuntime,
       resourceLoader,
-      sessionManager: SessionManager.inMemory(cwd),
+      sessionManager: SessionManager.inMemory(ctx.cwd),
       settingsManager,
     });
 
@@ -523,13 +534,21 @@ async function spawnChild(
       session.dispose();
       throw new Error("cancelled before start");
     }
-    const killSession = () => { void session.abort(); };
+    const killSession = () => {
+      // abort() stops the current run/retry but NOT auto-compaction.
+      session.abortCompaction();
+      void session.abort();
+    };
     signal?.addEventListener("abort", killSession, { once: true });
 
     // Structured transcript for the full-screen viewer and widget:
     // assistant messages (thinking + text) and tool executions as blocks.
     // The value returned to the parent model stays the assistant text only.
     let finalText = "";
+    // Set when the child's model reports a context-window overflow. pi's own
+    // overflow recovery re-summarizes the same oversized context and fails the
+    // same way, so stop the run and report it to the orchestrator instead.
+    let overflowError: string | undefined;
 
     const lastAssistantBlock = (): AssistantBlock | undefined => {
       for (let i = state.blocks.length - 1; i >= 0; i--) {
@@ -568,7 +587,20 @@ async function spawnChild(
           block.streaming = false;
           block.version++;
         }
-        finalText += (ev.message.content as { type: string; text?: string }[])
+        const msg = ev.message as { stopReason?: string; errorMessage?: string };
+        // isContextOverflow also covers a `length` stop that was cut off by the
+        // window (no errorMessage) — treat it as an overflow too. A `stop` stop
+        // that merely exceeded the window produced a valid answer, so keep it.
+        if (msg.stopReason !== "stop" &&
+            isContextOverflow(msg as Parameters<typeof isContextOverflow>[0], ctx.model?.contextWindow ?? 0)) {
+          overflowError = msg.errorMessage
+            ?? `The response was cut off by the model's context window (${ctx.model?.contextWindow ?? "?"} tokens).`;
+          session.abortCompaction();
+          void session.abort();
+        }
+        // Keep only the LAST assistant message's text — the final answer, not
+        // every intermediate "let me inspect…" preamble.
+        finalText = (ev.message.content as { type: string; text?: string }[])
           .filter((c) => c.type === "text")
           .map((c) => c.text ?? "")
           .join("");
@@ -606,19 +638,46 @@ async function spawnChild(
 
     try {
       await session.prompt(`${def.systemPrompt}\n\nTask: ${task}`);
+      if (overflowError) {
+        throw new Error([
+          `Subagent "${agentName}" stopped: its model ran out of context.`,
+          `Model: ${ctx.model?.provider}/${ctx.model?.id} (context window ${ctx.model?.contextWindow ?? "?"} tokens).`,
+          overflowError,
+          "",
+          "The task was too large for one subagent call. Split it into",
+          "smaller chunks (narrower file/area scope per call) and retry.",
+        ].join("\n"));
+      }
+      // prompt() can resolve before overflow/threshold compaction+retry
+      // finishes (pi flips isStreaming silently), so wait for the child to be
+      // fully idle before reading the transcript and disposing the session.
+      // Otherwise the child is disposed mid-compaction and the result is
+      // truncated or empty.
+      while (
+        session.isStreaming ||
+        session.isCompacting ||
+        session.isRetrying ||
+        session.pendingMessageCount > 0 ||
+        session.isBashRunning ||
+        session.hasPendingBashMessages
+      ) {
+        if (signal?.aborted) break;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
       // Fallback: if no message_end text was captured (e.g. unusual event
       // ordering), assemble the answer from the assistant blocks.
       if (!finalText.trim()) {
-        finalText = state.blocks
-          .filter((b): b is AssistantBlock => b.kind === "assistant")
-          .map((b) =>
-            ((b.message?.content as { type: string; text?: string }[] | undefined) ?? [])
-              .filter((c) => c.type === "text")
-              .map((c) => c.text ?? "")
-              .join(""),
-          )
-          .filter((t) => t.trim())
-          .join("\n\n");
+        // No message_end captured: use the LAST assistant block's text, matching
+        // pi's lastAssistantText, rather than joining every block's preamble.
+        for (let i = state.blocks.length - 1; i >= 0; i--) {
+          const b = state.blocks[i]!;
+          if (b.kind !== "assistant") continue;
+          finalText = ((b.message?.content as { type: string; text?: string }[] | undefined) ?? [])
+            .filter((c) => c.type === "text")
+            .map((c) => c.text ?? "")
+            .join("");
+          break;
+        }
       }
       return finalText.trim();
     } finally {
@@ -797,7 +856,7 @@ export default function (pi: ExtensionAPI) {
         tasks.map(async (t, i) => {
           const key = taskKeys[i]!;
           try {
-            return await spawnChild(t.agent, t.task, ctx.cwd, signal, agentStates.get(key)!, () => {
+            const text = await spawnChild(t.agent, t.task, ctx, signal, agentStates.get(key)!, pi.getThinkingLevel(), () => {
               // Throttle widget updates to ~150ms intervals
               const now = Date.now();
               if (now - lastWidgetUpdate > 150) {
@@ -805,10 +864,11 @@ export default function (pi: ExtensionAPI) {
                 updateWidget();
               }
             });
+            return { text, isError: false };
           } catch (err) {
             const state = agentStates.get(key);
             if (state) state.status = "error";
-            return `Error: ${err instanceof Error ? err.message : String(err)}`;
+            return { text: `Error: ${err instanceof Error ? err.message : String(err)}`, isError: true };
           }
         }),
       );
@@ -832,13 +892,13 @@ export default function (pi: ExtensionAPI) {
       for (let i = 0; i < tasks.length; i++) {
         const header = `── ${tasks[i]!.agent} (${tasks[i]!.task.slice(0, 60)}) ──`;
         lines.push(header);
-        lines.push(results[i] || "(no output)");
+        lines.push(results[i]!.text || "(no output)");
         lines.push("");
       }
 
       return {
         content: [{ type: "text", text: lines.join("\n").trim() || "(no output)" }],
-        isError: false,
+        isError: results.some((r) => r.isError),
         details: {},
       };
     },
@@ -872,7 +932,10 @@ export default function (pi: ExtensionAPI) {
         );
       }
 
-      const full = result.content?.[0]?.type === "text" ? result.content[0].text : "";
+      const full = (result.content ?? [])
+        .filter((c) => c.type === "text")
+        .map((c) => (c as { type: "text"; text: string }).text)
+        .join("\n");
       const n = full.split("\n").length;
 
       if (!options.expanded && !context.isError) {

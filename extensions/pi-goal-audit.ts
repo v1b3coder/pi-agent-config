@@ -8,7 +8,7 @@
 
 import { defineTool, createAgentSession, createExtensionRuntime, SessionManager, SettingsManager, ModelRuntime, getAgentDir, type ExtensionAPI, type ExtensionContext, type Theme, type ResourceLoader } from "@earendil-works/pi-coding-agent";
 import { Text, matchesKey } from "@earendil-works/pi-tui";
-import { Type } from "@earendil-works/pi-ai";
+import { Type, isContextOverflow } from "@earendil-works/pi-ai";
 import { join } from "node:path";
 
 // ── Constants ────────────────────────────────────────────────────────────
@@ -117,8 +117,12 @@ function makeAuditorLoader(): ResourceLoader {
 
 
 
-async function runAuditor(ctx: ExtensionContext, state: GoalState, claim: string, signal?: AbortSignal): Promise<{ approved: boolean; output: string; error?: string }> {
+async function runAuditor(ctx: ExtensionContext, state: GoalState, claim: string, thinkingLevel: NonNullable<Parameters<typeof createAgentSession>[0]>["thinkingLevel"], signal?: AbortSignal): Promise<{ approved: boolean; output: string; error?: string }> {
 	const parts: string[] = [];
+	// Set when the auditor's model reports a context-window overflow. Without
+	// this the auditor silently returns an empty report and update_goal reports a
+	// misleading "rejected" with no findings.
+	let overflowError: string | undefined;
 	const AUDITOR_STATUS_KEY = "pi-goal-auditor-stream";
 	let notifyTimer: ReturnType<typeof setTimeout> | null = null;
 	const flushNotify = () => {
@@ -147,6 +151,7 @@ async function runAuditor(ctx: ExtensionContext, state: GoalState, claim: string
 		const { session } = await createAgentSession({
 			cwd: ctx.cwd,
 			model: ctx.model,
+			thinkingLevel,
 			modelRuntime,
 			resourceLoader: makeAuditorLoader(),
 			sessionManager: SessionManager.inMemory(ctx.cwd),
@@ -178,6 +183,13 @@ async function runAuditor(ctx: ExtensionContext, state: GoalState, claim: string
 			if (event.type === "message_end") {
 				const msg = event.message;
 				if (msg?.role !== "assistant") return;
+				if (msg.stopReason !== "stop" &&
+					isContextOverflow(msg, ctx.model?.contextWindow ?? 0)) {
+					overflowError = msg.errorMessage
+						?? `The response was cut off by the model's context window (${ctx.model?.contextWindow ?? "?"} tokens).`;
+					session.abortCompaction();
+					void session.abort();
+				}
 				for (const p of msg.content ?? []) {
 					if (p.type === "text" && typeof p.text === "string") {
 						// Avoid duplicating text already captured via deltas
@@ -205,6 +217,9 @@ async function runAuditor(ctx: ExtensionContext, state: GoalState, claim: string
 			ctx.ui.setStatus(AUDITOR_STATUS_KEY, "");
 		}
 
+		if (overflowError) {
+			return { approved: false, output: parts.join("").trim(), error: `context overflow: ${overflowError}` };
+		}
 		const output = parts.join("").trim();
 		const approved = /<approved\s*\/>/.test(output);
 		const disapproved = /<disapproved\s*\/>/.test(output);
@@ -308,7 +323,7 @@ export default function piGoalAudit(pi: ExtensionAPI) {
 
 			let auditorResult: { approved: boolean; output: string; error?: string };
 			try {
-				auditorResult = await runAuditor(ctx, goal, completionSummary, abortController.signal);
+				auditorResult = await runAuditor(ctx, goal, completionSummary, pi.getThinkingLevel(), abortController.signal);
 			} finally {
 				unsubTerminal?.();
 			}

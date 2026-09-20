@@ -2,6 +2,28 @@
   "providers": {
     "litellm": {
       "modelOverrides": {
+        "beast/big": {
+          "reasoning": true,
+          "thinkingLevelMap": {
+            "off": null,
+            "medium": "high",
+            "high": "max"
+          },
+          "compat": {
+            "thinkingFormat": "deepseek"
+          }
+        },
+        "deepseek-ai/DeepSeek-V4.1-Flash": {
+          "reasoning": true,
+          "thinkingLevelMap": {
+            "off": null,
+            "medium": "high",
+            "high": "max"
+          },
+          "compat": {
+            "thinkingFormat": "deepseek"
+          }
+        },
         "deepseek-ai/DeepSeek-V4-Flash": {
           "reasoning": true,
           "thinkingLevelMap": {
