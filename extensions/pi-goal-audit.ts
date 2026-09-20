@@ -101,6 +101,10 @@ function makeAuditorLoader(): ResourceLoader {
 			"Never modify files.",
 			"Use read, grep, find, ls, and bash to inspect real artifacts.",
 			"",
+			"Be thorough but decisive: inspect as much as the task needs, do not repeat",
+			"the same command or file, and stop once you have enough evidence.",
+			"You MUST finish with a plain-text message (never end on a tool call).",
+			"",
 			'End your report with exactly one of:',
 			"<approved/>",
 			"<disapproved/>",
@@ -158,7 +162,10 @@ async function runAuditor(ctx: ExtensionContext, state: GoalState, claim: string
 		const unsub = session.subscribe((event: any) => {
 			if (event.type === "message_update") {
 				const ame = event.assistantMessageEvent;
-				if (ame?.type === "text_delta" && typeof ame.delta === "string") {
+				if (
+					(ame?.type === "text_delta" || ame?.type === "thinking_delta") &&
+					typeof ame.delta === "string"
+				) {
 					parts.push(ame.delta);
 					const acc = parts.join("");
 					const lastLine = acc.trim().split("\n").pop() ?? "";
@@ -184,6 +191,13 @@ async function runAuditor(ctx: ExtensionContext, state: GoalState, claim: string
 
 		try {
 			await session.prompt(buildAuditPrompt(state, claim));
+			// Reasoning models sometimes loop on tool calls and end with no
+			// final text.  Ask once more, explicitly, for the verdict.
+			if (!/<(?:approved|disapproved)\s*\/>/.test(parts.join(""))) {
+				await session.prompt(
+					"Stop inspecting now and report. End with exactly <approved/> or <disapproved/>.",
+				);
+			}
 		} finally {
 			if (notifyTimer) clearTimeout(notifyTimer);
 			unsub();
@@ -194,6 +208,17 @@ async function runAuditor(ctx: ExtensionContext, state: GoalState, claim: string
 		const output = parts.join("").trim();
 		const approved = /<approved\s*\/>/.test(output);
 		const disapproved = /<disapproved\s*\/>/.test(output);
+		// A missing verdict is a failure of the audit, not a rejection of the goal.
+		// Treating it as a rejection silently blocked completion forever.
+		if (!approved && !disapproved) {
+			return {
+				approved: false,
+				output,
+				error: output
+					? "auditor finished without a verdict (<approved/> or <disapproved/>)"
+					: "auditor produced no output",
+			};
+		}
 		return { approved: approved && !disapproved, output };
 	} catch (err) {
 		if (notifyTimer) clearTimeout(notifyTimer);
@@ -309,9 +334,12 @@ export default function piGoalAudit(pi: ExtensionAPI) {
 			}
 
 			// ── Handle auditor error ───────────────────────────────────────
-			if (auditorResult.error && !auditorResult.output) {
+			if (auditorResult.error) {
+				const tail = auditorResult.output
+					? `\n\nAuditor output tail:\n${auditorResult.output.slice(-1500)}`
+					: "";
 				return {
-					content: [{ type: "text", text: `Auditor error: ${auditorResult.error}. Goal remains active.` }],
+					content: [{ type: "text", text: `Auditor error: ${auditorResult.error}. Goal remains active.${tail}` }],
 					details: { goal },
 					isError: true,
 				};
