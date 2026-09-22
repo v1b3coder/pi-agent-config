@@ -50,6 +50,8 @@ const MAX_HEADER_LENGTH = 16;
 const CUSTOM_CHOICE = "✎ Type your own answer…";
 /** Sentinel option that submits a multi-select question in dialog mode. */
 const DONE_CHOICE = "✓ Done selecting";
+/** Sentinel option that aborts the dialog flow for renderers without dismiss support. */
+const CANCEL_CHOICE = "✗ Cancel";
 
 // ── Types ─────────────────────────────────────────────────────────
 
@@ -635,6 +637,10 @@ function deliverAnswers(
  * (`ui.select` / `ui.input`), which works in RPC/IDE mode where `ui.custom()`
  * is unavailable. Returns null when the user dismisses a question, mirroring
  * the TUI's Escape behavior.
+ *
+ * Every select dialog ends with an explicit cancel item: some client renderers
+ * never send the `cancelled: true` response, so a visible way out must exist
+ * in the option list itself.
  */
 async function askQuestionsViaDialogs(
 	ui: ExtensionUIContext,
@@ -658,9 +664,10 @@ async function askQuestionsViaDialogs(
 				);
 				options.push(DONE_CHOICE);
 				if (allowCustom) options.push(CUSTOM_CHOICE);
+				options.push(CANCEL_CHOICE);
 
 				const choice = await ui.select(title, options, { signal });
-				if (choice === undefined) return null;
+				if (choice === undefined || choice === CANCEL_CHOICE) return null;
 				if (choice === DONE_CHOICE) break;
 				if (allowCustom && choice === CUSTOM_CHOICE) {
 					const text = await ui.input(title, "Type your answer", { signal });
@@ -685,9 +692,10 @@ async function askQuestionsViaDialogs(
 		for (;;) {
 			const options = q.options.map((o, i) => `${i + 1}. ${o.label}`);
 			if (allowCustom) options.push(CUSTOM_CHOICE);
+			options.push(CANCEL_CHOICE);
 
 			const choice = await ui.select(title, options, { signal });
-			if (choice === undefined) return null;
+			if (choice === undefined || choice === CANCEL_CHOICE) return null;
 			if (allowCustom && choice === CUSTOM_CHOICE) {
 				const text = await ui.input(title, "Type your answer", { signal });
 				if (text === undefined) continue; // back to the options
