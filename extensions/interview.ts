@@ -13,11 +13,21 @@
  * keyboard-navigable overlay with tabs, single/multi select, custom text,
  * review tab, and a rendered markdown answer block in the transcript.
  *
+ * Mode support:
+ *   - TUI: the full custom overlay (custom components are TUI-only).
+ *   - RPC/IDE: select/input dialogs over the extension UI protocol.
+ *   - JSON/print: a text fallback asking the LLM to assume.
+ *
  * Tool:
  *   interview — Ask structured clarifying questions (batch up to 4).
  */
 
-import type { ExtensionAPI, ThemeColor } from "@earendil-works/pi-coding-agent";
+import type {
+	AgentToolResult,
+	ExtensionAPI,
+	ExtensionUIContext,
+	ThemeColor,
+} from "@earendil-works/pi-coding-agent";
 import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import {
 	Key,
@@ -35,6 +45,11 @@ const MAX_QUESTIONS = 4;
 const MIN_OPTIONS = 2;
 const MAX_OPTIONS = 4;
 const MAX_HEADER_LENGTH = 16;
+
+/** Sentinel option that opens free-text input in dialog mode (RPC/IDE). */
+const CUSTOM_CHOICE = "✎ Type your own answer…";
+/** Sentinel option that submits a multi-select question in dialog mode. */
+const DONE_CHOICE = "✓ Done selecting";
 
 // ── Types ─────────────────────────────────────────────────────────
 
@@ -566,6 +581,130 @@ class InterviewPrompt {
 	}
 }
 
+// ── Dialog flow (RPC / IDE) ────────────────────────────────────────
+
+/** Result returned when the user dismisses the questions. */
+function dismissedResult(): AgentToolResult<{ dismissed: true }> {
+	return {
+		content: [
+			{
+				type: "text",
+				text: "Questions were dismissed by the user. Proceed with your best judgment based on what you know, or make reasonable assumptions.",
+			},
+		],
+		details: { dismissed: true },
+	};
+}
+
+/**
+ * Deliver answers to the LLM in the same turn via steer, then return the tool
+ * result. Shared by the TUI overlay and the dialog-based RPC flow.
+ */
+function deliverAnswers(
+	pi: ExtensionAPI,
+	questions: PlanQuestion[],
+	answers: string[][],
+): AgentToolResult<{ answers: string[][] }> {
+	const lines = questions.map((q, i) => {
+		const answerText = (answers[i] ?? []).join(", ") || "*(no preference)*";
+		return `> ${q.question}\n→ **${answerText}**`;
+	});
+	const md = `## Q&A Complete\n\n${lines.join("\n\n")}`;
+
+	// THE FIX (vs openplan plan_question): deliver via steer so the answers
+	// enter the LLM context before the next assistant response in the same turn.
+	// triggerTurn: false deferred them to turn_end, which the in-flight agent
+	// loop (running on a copied messages array) never saw.
+	pi.sendMessage(
+		{
+			customType: "interview-answers",
+			content: md,
+			display: true,
+		},
+		{ triggerTurn: true },
+	);
+
+	return {
+		content: [{ type: "text", text: "Answers recorded." }],
+		details: { answers },
+	};
+}
+
+/**
+ * Ask all questions through the extension UI dialog protocol
+ * (`ui.select` / `ui.input`), which works in RPC/IDE mode where `ui.custom()`
+ * is unavailable. Returns null when the user dismisses a question, mirroring
+ * the TUI's Escape behavior.
+ */
+async function askQuestionsViaDialogs(
+	ui: ExtensionUIContext,
+	questions: PlanQuestion[],
+	signal: AbortSignal | undefined,
+): Promise<string[][] | null> {
+	const answers: string[][] = [];
+
+	for (const q of questions) {
+		const allowCustom = q.custom !== false;
+		const title = q.multiSelect
+			? `${q.question} (select all that apply)`
+			: q.question;
+
+		if (q.multiSelect) {
+			const picked = new Set<string>();
+			let customText = "";
+			for (;;) {
+				const options = q.options.map(
+					(o, i) => `${picked.has(o.label) ? "☑" : "☐"} ${i + 1}. ${o.label}`,
+				);
+				options.push(DONE_CHOICE);
+				if (allowCustom) options.push(CUSTOM_CHOICE);
+
+				const choice = await ui.select(title, options, { signal });
+				if (choice === undefined) return null;
+				if (choice === DONE_CHOICE) break;
+				if (allowCustom && choice === CUSTOM_CHOICE) {
+					const text = await ui.input(title, "Type your answer", { signal });
+					if (text === undefined) continue; // back to the options
+					customText = text.trim();
+					continue;
+				}
+
+				const opt = q.options[options.indexOf(choice)];
+				if (!opt) continue;
+				if (picked.has(opt.label)) {
+					picked.delete(opt.label);
+				} else {
+					picked.add(opt.label);
+				}
+			}
+			answers.push([...picked, ...(customText ? [customText] : [])]);
+			continue;
+		}
+
+		// Single-select: pick an option or type a custom answer.
+		for (;;) {
+			const options = q.options.map((o, i) => `${i + 1}. ${o.label}`);
+			if (allowCustom) options.push(CUSTOM_CHOICE);
+
+			const choice = await ui.select(title, options, { signal });
+			if (choice === undefined) return null;
+			if (allowCustom && choice === CUSTOM_CHOICE) {
+				const text = await ui.input(title, "Type your answer", { signal });
+				if (text === undefined) continue; // back to the options
+				answers.push(text.trim() ? [text.trim()] : []);
+				break;
+			}
+
+			const opt = q.options[options.indexOf(choice)];
+			if (!opt) continue;
+			answers.push([opt.label]);
+			break;
+		}
+	}
+
+	return answers;
+}
+
 // ── Tool Registration ──────────────────────────────────────────────────
 
 export default function interviewExtension(pi: ExtensionAPI): void {
@@ -627,7 +766,7 @@ export default function interviewExtension(pi: ExtensionAPI): void {
 				},
 			),
 		}),
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 			const input = params as unknown as PlanQuestionInput;
 
 			// Validate input — throw to signal errors (per pi docs: returning isError:true has no effect)
@@ -647,8 +786,9 @@ export default function interviewExtension(pi: ExtensionAPI): void {
 				}
 			}
 
-			// Interactive mode: present as TUI overlay
-			if (ctx.hasUI && ctx.ui.custom) {
+			// TUI: present the custom overlay. `custom()` is TUI-only — in RPC
+			// mode it returns undefined — so guard by mode, not by hasUI.
+			if (ctx.mode === "tui") {
 				const result = await ctx.ui.custom<string[][] | null>(
 					(tui, theme, _kb, done) => {
 						const prompt = new InterviewPrompt(input.questions, theme, done);
@@ -665,45 +805,21 @@ export default function interviewExtension(pi: ExtensionAPI): void {
 					},
 				);
 
-				if (result === null) {
-					return {
-						content: [
-							{
-								type: "text",
-								text: "Questions were dismissed by the user. Proceed with your best judgment based on what you know, or make reasonable assumptions.",
-							},
-						],
-						details: { dismissed: true },
-					};
-				}
+				// null = user dismissed; undefined = custom UI unavailable (defensive)
+				if (result == null) return dismissedResult();
+				return deliverAnswers(pi, input.questions, result);
+			}
 
-				// Build formatted markdown summary
-				const questionsLines = input.questions.map((q, i) => {
-					const answers_i = result[i] ?? [];
-					const answerText =
-						answers_i.length > 0 ? answers_i.join(", ") : "*(no preference)*";
-					return `> ${q.question}\n→ **${answerText}**`;
-				});
-				const md = `## Q&A Complete\n\n${questionsLines.join("\n\n")}`;
-
-				// THE FIX (vs openplan plan_question): deliver via steer so the
-				// answers enter the LLM context before the next assistant response
-				// in the same turn. triggerTurn: false deferred them to turn_end,
-				// which the in-flight agent loop (running on a copied messages
-				// array) never saw.
-				pi.sendMessage(
-					{
-						customType: "interview-answers",
-						content: md,
-						display: true,
-					},
-					{ triggerTurn: true },
+			// RPC / IDE: custom components are unavailable, but the client does
+			// implement the extension UI dialog protocol, so ask with dialogs.
+			if (ctx.hasUI) {
+				const result = await askQuestionsViaDialogs(
+					ctx.ui,
+					input.questions,
+					signal,
 				);
-
-				return {
-					content: [{ type: "text", text: "Answers recorded." }],
-					details: { answers: result },
-				};
+				if (result === null) return dismissedResult();
+				return deliverAnswers(pi, input.questions, result);
 			}
 
 			// Non-interactive mode (print / JSON): return questions as text

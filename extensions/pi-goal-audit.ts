@@ -311,7 +311,9 @@ export default function piGoalAudit(pi: ExtensionAPI) {
 
 			const abortController = new AbortController();
 			let unsubTerminal: (() => void) | null = null;
-			if (ctx.hasUI && ctx.ui.onTerminalInput) {
+			// onTerminalInput is TUI-only: RPC exposes it but it never fires, so
+			// `hasUI` alone would silently swallow Esc. Guard by mode instead.
+			if (ctx.mode === "tui" && ctx.ui.onTerminalInput) {
 				unsubTerminal = ctx.ui.onTerminalInput((data) => {
 					if (matchesKey(data, "escape")) {
 						abortController.abort();

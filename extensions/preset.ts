@@ -458,11 +458,27 @@ export default function presetExtension(pi: ExtensionAPI) {
   // Selector overlay
   // -------------------------------------------------------------------------
 
+  /**
+   * Pick one item from a list. TUI gets the custom overlay; RPC/IDE gets a
+   * `ui.select` dialog (`ui.custom()` is TUI-only and returns undefined
+   * there). Returns null when the user cancels.
+   */
   async function pickFromList(
     title: string,
     items: SelectItem[],
     ctx: ExtensionContext,
   ): Promise<string | null> {
+    if (ctx.mode !== "tui") {
+      if (!ctx.hasUI) return null;
+      const options = items.map((item) =>
+        item.description ? `${item.label} — ${item.description}` : item.label,
+      );
+      const choice = await ctx.ui.select(title, options);
+      if (choice === undefined) return null;
+      const index = options.indexOf(choice);
+      return index >= 0 ? (items[index]?.value ?? null) : null;
+    }
+
     return ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
       const container = new Container();
       container.addChild(new DynamicBorder((s) => theme.fg("accent", s)));
@@ -741,6 +757,62 @@ export default function presetExtension(pi: ExtensionAPI) {
   }
 
   /**
+   * Dialog-based checkbox editor for RPC/IDE mode. `ui.custom()` is TUI-only,
+   * so the same toggle model is presented as repeated `ui.select` rounds.
+   * Returns null when the user dismisses a dialog (like Esc in the TUI).
+   */
+  async function editCategoryViaDialogs(
+    items: EditableItem[],
+    displayName: string,
+    category: Category,
+    initialOn: Set<string>,
+    initialMode: Mode,
+    ctx: ExtensionContext,
+  ): Promise<{ on: Set<string>; mode: Mode } | null> {
+    const allNames = items.map((i) => i.name);
+    const on = new Set(initialOn);
+    let mode = initialMode;
+
+    const SAVE = "✓ Save";
+    const TOGGLE_MODE = "⇄ Toggle mode";
+    const ALL = "✓ All";
+    const NONE = "✗ None";
+
+    for (;;) {
+      const options = items.map(
+        (item) =>
+          `${on.has(item.name) ? "☑" : "☐"} ${item.name}${item.source ? ` [${item.source}]` : ""}`,
+      );
+      options.push(SAVE, TOGGLE_MODE, ALL, NONE);
+
+      const title =
+        `Edit ${displayName} → ${category}` +
+        ` · mode: ${mode} (${mode === "enabled" ? "only checked are on" : "all except checked are on"})`;
+      const choice = await ctx.ui.select(title, options);
+      if (choice === undefined) return null; // dismissed = TUI Esc
+      if (choice === SAVE) return { on, mode };
+      if (choice === TOGGLE_MODE) {
+        mode = mode === "enabled" ? "disabled" : "enabled";
+        continue;
+      }
+      if (choice === ALL) {
+        for (const name of allNames) on.add(name);
+        continue;
+      }
+      if (choice === NONE) {
+        on.clear();
+        continue;
+      }
+
+      const index = options.indexOf(choice);
+      const item = items[index];
+      if (!item) continue;
+      if (on.has(item.name)) on.delete(item.name);
+      else on.add(item.name);
+    }
+  }
+
+  /**
    * Edit a single category of a preset. Mutates `preset` in place when the
    * user commits. Returns null on cancel, or a summary on save. The caller is
    * responsible for persisting and re-applying.
@@ -783,147 +855,155 @@ export default function presetExtension(pi: ExtensionAPI) {
       on = new Set(allNames);
     }
 
-    const result = await ctx.ui.custom<{ on: Set<string>; mode: Mode } | null>((tui, theme, _kb, done) => {
-      let cursor = 0;
-      const maxVisible = 14;
-      let scrollTop = 0;
+    let result: { on: Set<string>; mode: Mode } | null;
+    if (ctx.mode === "tui") {
+      result = await ctx.ui.custom<{ on: Set<string>; mode: Mode } | null>((tui, theme, _kb, done) => {
+        let cursor = 0;
+        const maxVisible = 14;
+        let scrollTop = 0;
 
-      // Horizontal scroll offset into the selected row's description.
-      // Resets whenever the cursor moves so each item starts from the left.
-      let descScroll = 0;
-      const DESC_STEP = 8;
+        // Horizontal scroll offset into the selected row's description.
+        // Resets whenever the cursor moves so each item starts from the left.
+        let descScroll = 0;
+        const DESC_STEP = 8;
 
-      const ensureVisible = () => {
-        if (cursor < scrollTop) scrollTop = cursor;
-        else if (cursor >= scrollTop + maxVisible) scrollTop = cursor - maxVisible + 1;
-      };
+        const ensureVisible = () => {
+          if (cursor < scrollTop) scrollTop = cursor;
+          else if (cursor >= scrollTop + maxVisible) scrollTop = cursor - maxVisible + 1;
+        };
 
-      const moveCursor = (delta: number) => {
-        const next = Math.min(items.length - 1, Math.max(0, cursor + delta));
-        if (next !== cursor) {
-          cursor = next;
-          descScroll = 0;
-        }
-      };
-
-      const render = (width: number): string[] => {
-        ensureVisible();
-        const lines: string[] = [];
-        const fg = theme.fg.bind(theme);
-        const border = "─".repeat(Math.max(0, width - 2));
-
-        lines.push(fg("accent", `┌${border}┐`));
-        lines.push(fg("accent", "│") + pad(` Edit ${displayName} → ${category}`, width - 2) + fg("accent", "│"));
-        lines.push(
-          fg("accent", "│") +
-          pad(
-            ` mode: ${theme.bold(mode)}   ${mode === "enabled" ? "(only listed are on)" : "(all except listed are on)"}`,
-            width - 2,
-          ) +
-          fg("accent", "│"),
-        );
-        lines.push(
-          fg("accent", "│") +
-          pad(fg("dim", ` ${on.size}/${allNames.length} on`), width - 2) +
-          fg("accent", "│"),
-        );
-        lines.push(fg("accent", "├") + fg("accent", border) + fg("accent", "┤"));
-
-        const slice = items.slice(scrollTop, scrollTop + maxVisible);
-        // Compute name column width so source/description align across rows.
-        const visibleSlice = items.slice(scrollTop, scrollTop + maxVisible);
-        const maxNameLen = visibleSlice.reduce((m, it) => Math.max(m, it.name.length), 0);
-        const maxSrcLen = visibleSlice.reduce((m, it) => Math.max(m, it.source.length), 0);
-
-        slice.forEach((it, idx) => {
-          const absIdx = scrollTop + idx;
-          const selected = absIdx === cursor;
-          const checked = on.has(it.name);
-          const mark = checked ? fg("accent", "[✔]") : fg("dim", "[ ]");
-          const labelText = it.name.padEnd(maxNameLen);
-          const label = selected ? fg("accent", labelText) : labelText;
-          const srcRaw = it.source.padEnd(maxSrcLen);
-          const src = it.source ? fg("dim", "  " + srcRaw) : "";
-
-          // Description fills the remainder of the row, truncated to fit.
-          // For the selected row, apply horizontal scroll so the user can
-          // walk through long descriptions with ←/→.
-          const fixedLen = 1 /* leading space */ + 3 /* [x] / [ ] */ + 1 /* space */
-                         + maxNameLen
-                         + (it.source ? 2 + maxSrcLen : 0)
-                         + 3 /* "  ·" */ + 1 /* trailing space */;
-          const budget = (width - 2) - fixedLen;
-          let descText = it.description ?? "";
-          let scrolledPrefix = "";
-          if (selected && descScroll > 0 && descScroll < descText.length) {
-            descText = descText.slice(descScroll);
-            scrolledPrefix = "…";
+        const moveCursor = (delta: number) => {
+          const next = Math.min(items.length - 1, Math.max(0, cursor + delta));
+          if (next !== cursor) {
+            cursor = next;
+            descScroll = 0;
           }
-          const desc = it.description && budget > 4
-            ? fg("dim", "  · " + scrolledPrefix + shorten(descText, budget - scrolledPrefix.length))
-            : "";
+        };
 
+        const render = (width: number): string[] => {
+          ensureVisible();
+          const lines: string[] = [];
+          const fg = theme.fg.bind(theme);
+          const border = "─".repeat(Math.max(0, width - 2));
+
+          lines.push(fg("accent", `┌${border}┐`));
+          lines.push(fg("accent", "│") + pad(` Edit ${displayName} → ${category}`, width - 2) + fg("accent", "│"));
           lines.push(
             fg("accent", "│") +
-            pad(` ${mark} ${label}${src}${desc}`, width - 2) +
+            pad(
+              ` mode: ${theme.bold(mode)}   ${mode === "enabled" ? "(only listed are on)" : "(all except listed are on)"}`,
+              width - 2,
+            ) +
             fg("accent", "│"),
           );
-        });
-
-        if (items.length > maxVisible) {
           lines.push(
             fg("accent", "│") +
-            pad(fg("dim", `   ${scrollTop + 1}-${Math.min(scrollTop + maxVisible, items.length)} of ${items.length}`), width - 2) +
+            pad(fg("dim", ` ${on.size}/${allNames.length} on`), width - 2) +
             fg("accent", "│"),
           );
-        }
+          lines.push(fg("accent", "├") + fg("accent", border) + fg("accent", "┤"));
 
-        lines.push(fg("accent", "├") + fg("accent", border) + fg("accent", "┤"));
-        lines.push(
-          fg("accent", "│") +
-          pad(fg("dim", " ↑↓ move · ←→ scroll desc · space toggle · m mode · a/n all/none · enter save · esc cancel"), width - 2) +
-          fg("accent", "│"),
-        );
-        lines.push(fg("accent", `└${border}┘`));
-        return lines;
-      };
+          const slice = items.slice(scrollTop, scrollTop + maxVisible);
+          // Compute name column width so source/description align across rows.
+          const visibleSlice = items.slice(scrollTop, scrollTop + maxVisible);
+          const maxNameLen = visibleSlice.reduce((m, it) => Math.max(m, it.name.length), 0);
+          const maxSrcLen = visibleSlice.reduce((m, it) => Math.max(m, it.source.length), 0);
 
-      return {
-        render,
-        invalidate() { },
-        handleInput(data: string) {
-          if (matchesKey(data, Key.up))       { moveCursor(-1); tui.requestRender(); return; }
-          if (matchesKey(data, Key.down))     { moveCursor(1); tui.requestRender(); return; }
-          if (matchesKey(data, Key.pageUp))   { moveCursor(-maxVisible); tui.requestRender(); return; }
-          if (matchesKey(data, Key.pageDown)) { moveCursor(maxVisible); tui.requestRender(); return; }
-          if (matchesKey(data, Key.home))     { moveCursor(-items.length); tui.requestRender(); return; }
-          if (matchesKey(data, Key.end))      { moveCursor(items.length); tui.requestRender(); return; }
-          if (matchesKey(data, Key.left)) {
-            descScroll = Math.max(0, descScroll - DESC_STEP);
-            tui.requestRender();
-            return;
+          slice.forEach((it, idx) => {
+            const absIdx = scrollTop + idx;
+            const selected = absIdx === cursor;
+            const checked = on.has(it.name);
+            const mark = checked ? fg("accent", "[✔]") : fg("dim", "[ ]");
+            const labelText = it.name.padEnd(maxNameLen);
+            const label = selected ? fg("accent", labelText) : labelText;
+            const srcRaw = it.source.padEnd(maxSrcLen);
+            const src = it.source ? fg("dim", "  " + srcRaw) : "";
+
+            // Description fills the remainder of the row, truncated to fit.
+            // For the selected row, apply horizontal scroll so the user can
+            // walk through long descriptions with ←/→.
+            const fixedLen = 1 /* leading space */ + 3 /* [x] / [ ] */ + 1 /* space */
+                           + maxNameLen
+                           + (it.source ? 2 + maxSrcLen : 0)
+                           + 3 /* "  ·" */ + 1 /* trailing space */;
+            const budget = (width - 2) - fixedLen;
+            let descText = it.description ?? "";
+            let scrolledPrefix = "";
+            if (selected && descScroll > 0 && descScroll < descText.length) {
+              descText = descText.slice(descScroll);
+              scrolledPrefix = "…";
+            }
+            const desc = it.description && budget > 4
+              ? fg("dim", "  · " + scrolledPrefix + shorten(descText, budget - scrolledPrefix.length))
+              : "";
+
+            lines.push(
+              fg("accent", "│") +
+              pad(` ${mark} ${label}${src}${desc}`, width - 2) +
+              fg("accent", "│"),
+            );
+          });
+
+          if (items.length > maxVisible) {
+            lines.push(
+              fg("accent", "│") +
+              pad(fg("dim", `   ${scrollTop + 1}-${Math.min(scrollTop + maxVisible, items.length)} of ${items.length}`), width - 2) +
+              fg("accent", "│"),
+            );
           }
-          if (matchesKey(data, Key.right)) {
-            const desc = items[cursor]?.description ?? "";
-            // Cap so at least one char of the description stays visible.
-            descScroll = Math.min(Math.max(0, desc.length - 1), descScroll + DESC_STEP);
-            tui.requestRender();
-            return;
-          }
-          if (data === " ") {
-            const n = items[cursor].name;
-            if (on.has(n)) on.delete(n); else on.add(n);
-            tui.requestRender();
-            return;
-          }
-          if (data === "m") { mode = mode === "enabled" ? "disabled" : "enabled"; tui.requestRender(); return; }
-          if (data === "a") { for (const i of items) on.add(i.name); tui.requestRender(); return; }
-          if (data === "n") { on.clear(); tui.requestRender(); return; }
-          if (matchesKey(data, Key.enter))  { done({ on, mode }); return; }
-          if (matchesKey(data, Key.escape)) { done(null); return; }
-        },
-      };
-    }, { overlay: true });
+
+          lines.push(fg("accent", "├") + fg("accent", border) + fg("accent", "┤"));
+          lines.push(
+            fg("accent", "│") +
+            pad(fg("dim", " ↑↓ move · ←→ scroll desc · space toggle · m mode · a/n all/none · enter save · esc cancel"), width - 2) +
+            fg("accent", "│"),
+          );
+          lines.push(fg("accent", `└${border}┘`));
+          return lines;
+        };
+
+        return {
+          render,
+          invalidate() { },
+          handleInput(data: string) {
+            if (matchesKey(data, Key.up))       { moveCursor(-1); tui.requestRender(); return; }
+            if (matchesKey(data, Key.down))     { moveCursor(1); tui.requestRender(); return; }
+            if (matchesKey(data, Key.pageUp))   { moveCursor(-maxVisible); tui.requestRender(); return; }
+            if (matchesKey(data, Key.pageDown)) { moveCursor(maxVisible); tui.requestRender(); return; }
+            if (matchesKey(data, Key.home))     { moveCursor(-items.length); tui.requestRender(); return; }
+            if (matchesKey(data, Key.end))      { moveCursor(items.length); tui.requestRender(); return; }
+            if (matchesKey(data, Key.left)) {
+              descScroll = Math.max(0, descScroll - DESC_STEP);
+              tui.requestRender();
+              return;
+            }
+            if (matchesKey(data, Key.right)) {
+              const desc = items[cursor]?.description ?? "";
+              // Cap so at least one char of the description stays visible.
+              descScroll = Math.min(Math.max(0, desc.length - 1), descScroll + DESC_STEP);
+              tui.requestRender();
+              return;
+            }
+            if (data === " ") {
+              const n = items[cursor].name;
+              if (on.has(n)) on.delete(n); else on.add(n);
+              tui.requestRender();
+              return;
+            }
+            if (data === "m") { mode = mode === "enabled" ? "disabled" : "enabled"; tui.requestRender(); return; }
+            if (data === "a") { for (const i of items) on.add(i.name); tui.requestRender(); return; }
+            if (data === "n") { on.clear(); tui.requestRender(); return; }
+            if (matchesKey(data, Key.enter))  { done({ on, mode }); return; }
+            if (matchesKey(data, Key.escape)) { done(null); return; }
+          },
+        };
+      }, { overlay: true });
+    } else if (ctx.hasUI) {
+      // RPC/IDE: port the checkbox editor to `ui.select` rounds.
+      result = await editCategoryViaDialogs(items, displayName, category, on, mode, ctx);
+    } else {
+      return null;
+    }
 
     if (!result) return null;
 
