@@ -462,19 +462,25 @@ export default function presetExtension(pi: ExtensionAPI) {
    * Pick one item from a list. TUI gets the custom overlay; RPC/IDE gets a
    * `ui.select` dialog (`ui.custom()` is TUI-only and returns undefined
    * there). Returns null when the user cancels.
+   *
+   * RPC dialogs always append an explicit cancel item: some client renderers
+   * never send the `cancelled: true` response, so a visible way out must exist
+   * in the option list itself.
    */
   async function pickFromList(
     title: string,
     items: SelectItem[],
     ctx: ExtensionContext,
+    cancelLabel = "✗ Cancel",
   ): Promise<string | null> {
     if (ctx.mode !== "tui") {
       if (!ctx.hasUI) return null;
       const options = items.map((item) =>
         item.description ? `${item.label} — ${item.description}` : item.label,
       );
+      options.push(cancelLabel);
       const choice = await ctx.ui.select(title, options);
-      if (choice === undefined) return null;
+      if (choice === undefined || choice === cancelLabel) return null;
       const index = options.indexOf(choice);
       return index >= 0 ? (items[index]?.value ?? null) : null;
     }
@@ -546,7 +552,12 @@ export default function presetExtension(pi: ExtensionAPI) {
         { value: "action:reload",    label: "Reload",       description: "Reread presets.json from disk" },
       ];
 
-      const choice = await pickFromList("Presets", [...presetItems, ...clearItem, ...actions], ctx);
+      const choice = await pickFromList(
+        "Presets",
+        [...presetItems, ...clearItem, ...actions],
+        ctx,
+        "✗ Quit preset tool",
+      );
       if (!choice) return;                              // esc on main menu → exit
 
       if (choice.startsWith("preset:")) {
@@ -727,12 +738,15 @@ export default function presetExtension(pi: ExtensionAPI) {
       return;
     }
 
+    const sections = ["tools", "skills"];
+    if (ctx.mode !== "tui") sections.push("✗ Cancel");
+
     while (true) {
       const category = await ctx.ui.select(
         `Edit ${scopeLabel(lookup.scope)} preset "${name}" — which section?`,
-        ["tools", "skills"],
+        sections,
       );
-      if (!category) return;                            // esc → back to preset picker
+      if (!category || category === "✗ Cancel") return;   // esc → back to preset picker
 
       if (category === "skills" && skillCache.length === 0) {
         ctx.ui.notify("No skills discovered yet — send any message first so the prompt loads", "warning");
@@ -759,7 +773,8 @@ export default function presetExtension(pi: ExtensionAPI) {
   /**
    * Dialog-based checkbox editor for RPC/IDE mode. `ui.custom()` is TUI-only,
    * so the same toggle model is presented as repeated `ui.select` rounds.
-   * Returns null when the user dismisses a dialog (like Esc in the TUI).
+   * Returns null when the user dismisses a dialog (like Esc in the TUI). Each
+   * round ends with an explicit cancel item for renderers without dismiss support.
    */
   async function editCategoryViaDialogs(
     items: EditableItem[],
@@ -777,19 +792,20 @@ export default function presetExtension(pi: ExtensionAPI) {
     const TOGGLE_MODE = "⇄ Toggle mode";
     const ALL = "✓ All";
     const NONE = "✗ None";
+    const CANCEL = "✗ Cancel";
 
     for (;;) {
       const options = items.map(
         (item) =>
           `${on.has(item.name) ? "☑" : "☐"} ${item.name}${item.source ? ` [${item.source}]` : ""}`,
       );
-      options.push(SAVE, TOGGLE_MODE, ALL, NONE);
+      options.push(SAVE, TOGGLE_MODE, ALL, NONE, CANCEL);
 
       const title =
         `Edit ${displayName} → ${category}` +
         ` · mode: ${mode} (${mode === "enabled" ? "only checked are on" : "all except checked are on"})`;
       const choice = await ctx.ui.select(title, options);
-      if (choice === undefined) return null; // dismissed = TUI Esc
+      if (choice === undefined || choice === CANCEL) return null; // dismissed = TUI Esc
       if (choice === SAVE) return { on, mode };
       if (choice === TOGGLE_MODE) {
         mode = mode === "enabled" ? "disabled" : "enabled";
