@@ -1,5 +1,5 @@
 {
-  "lastChangelogVersion": "0.84.4",
+  "lastChangelogVersion": "0.87.1",
   "defaultProvider": "litellm",
   "defaultModel": "deepseek-ai/DeepSeek-V4-Flash",
   "compaction": {
@@ -33,7 +33,7 @@
     },
     "npm:pi-footer",
     "npm:pi-mcp-adapter",
-    "npm:pi-agentic-compaction",
+    "!npm:pi-agentic-compaction",
     "!npm:pi-openplan",
     "npm:pi-interactive-shell",
     "npm:@dreki-gg/pi-context7"
