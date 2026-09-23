@@ -7,6 +7,12 @@
     "reserveTokens": 40960,
     "keepRecentTokens": 20000
   },
+  "retry": {
+    "enabled": true,
+    "maxRetries": 10000,
+    "baseDelayMs": 5000,
+    "maxAgentDelayMs": 1800000
+  },
   "packages": [
     {
       "source": "npm:pi-skill-tavily",
