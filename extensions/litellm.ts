@@ -370,14 +370,18 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       apiKey: `$${ENV_API_KEY}`, // pi resolves this per request; /login + --api-key work natively
       api: "openai-completions",
       models,
-      /** LiteLLM reports an upstream/deployment outage as HTTP 400
-       *  BadRequestError ("There are no healthy deployments for this model").
-       *  Pi's retry classifier only knows generic 5xx/timeout wording, so a
-       *  dead model behind a healthy proxy would stop the run instead of
-       *  entering Pi's exponential backoff. Wrap the built-in stream and tag
-       *  matching errors; wrapping streamSimple (not message_end) also covers
-       *  compaction and branch-summary calls, which never reach the agent loop.
-       *  Quota/billing errors are matched by Pi first and stay terminal. */
+      /** LiteLLM/proxy failures surface in two shapes Pi's retry classifier
+       *  does not know:
+       *   - HTTP 400 BadRequestError ("There are no healthy deployments for
+       *     this model") when the model behind a healthy proxy is down;
+       *   - a clean `finish_reason: "stop"` with usage but no text and no tool
+       *     call, when an upstream cut-off or a model/template quirk ends the
+       *     stream after thinking only.
+       *  Both are dead ends that stop the run and wait for a human, so wrap the
+       *  built-in stream and convert them into retryable errors. Wrapping
+       *  streamSimple (not message_end) also covers compaction and
+       *  branch-summary calls, which never reach the agent loop. Quota/billing
+       *  errors are matched by Pi first and stay terminal. */
       streamSimple(model, context, options) {
         const source = builtinStreamSimple(model, context, options);
         const out = createAssistantMessageEventStream();
@@ -391,9 +395,27 @@ export default async function (pi: ExtensionAPI): Promise<void> {
                   errorMessage: `${event.error.errorMessage} (upstream service unavailable)`,
                 },
               });
-            } else {
-              out.push(event);
+              continue;
             }
+            if (event.type === "done") {
+              const message = event.message;
+              const hasOutput = message.content.some(
+                (block) => block.type === "toolCall" || (block.type === "text" && block.text.trim().length > 0),
+              );
+              if (message.stopReason === "stop" && !hasOutput) {
+                out.push({
+                  type: "error",
+                  reason: "error",
+                  error: {
+                    ...message,
+                    stopReason: "error",
+                    errorMessage: "Response ended without text or tool calls (upstream service unavailable)",
+                  },
+                });
+                continue;
+              }
+            }
+            out.push(event);
           }
           out.end();
         })();
