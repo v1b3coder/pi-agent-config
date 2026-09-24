@@ -62,7 +62,7 @@
  */
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { getModels, getProviders } from "@earendil-works/pi-ai/compat";
+import { createAssistantMessageEventStream, getModels, getProviders, streamSimple as builtinStreamSimple } from "@earendil-works/pi-ai/compat";
 import { getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const PROVIDER = "litellm";
@@ -370,6 +370,35 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       apiKey: `$${ENV_API_KEY}`, // pi resolves this per request; /login + --api-key work natively
       api: "openai-completions",
       models,
+      /** LiteLLM reports an upstream/deployment outage as HTTP 400
+       *  BadRequestError ("There are no healthy deployments for this model").
+       *  Pi's retry classifier only knows generic 5xx/timeout wording, so a
+       *  dead model behind a healthy proxy would stop the run instead of
+       *  entering Pi's exponential backoff. Wrap the built-in stream and tag
+       *  matching errors; wrapping streamSimple (not message_end) also covers
+       *  compaction and branch-summary calls, which never reach the agent loop.
+       *  Quota/billing errors are matched by Pi first and stay terminal. */
+      streamSimple(model, context, options) {
+        const source = builtinStreamSimple(model, context, options);
+        const out = createAssistantMessageEventStream();
+        void (async () => {
+          for await (const event of source) {
+            if (event.type === "error" && UPSTREAM_UNAVAILABLE.test(event.error.errorMessage ?? "")) {
+              out.push({
+                ...event,
+                error: {
+                  ...event.error,
+                  errorMessage: `${event.error.errorMessage} (upstream service unavailable)`,
+                },
+              });
+            } else {
+              out.push(event);
+            }
+          }
+          out.end();
+        })();
+        return out;
+      },
       /** Live-discovery hook. Pi calls it after startup (fire-and-forget) and
        *  whenever the model picker refreshes, so the disk cache stays at most
        *  one run stale. Honors context.allowNetwork; the session_start
@@ -395,25 +424,6 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     );
   }
   register();
-
-  // LiteLLM reports an upstream/deployment outage as HTTP 400 BadRequestError
-  // ("There are no healthy deployments for this model"). Pi's retry classifier
-  // only knows generic 5xx/timeout wording, so a dead model behind a healthy
-  // proxy would stop the run instead of entering Pi's exponential backoff. Tag the
-  // finalized error as an upstream outage; quota/billing errors are matched by Pi
-  // first and stay terminal.
-  pi.on("message_end", (event) => {
-    const message = event.message;
-    if (message.role !== "assistant" || message.stopReason !== "error" || !message.errorMessage) return;
-    if (message.provider !== PROVIDER) return;
-    if (!UPSTREAM_UNAVAILABLE.test(message.errorMessage)) return;
-    return {
-      message: {
-        ...message,
-        errorMessage: `${message.errorMessage} (upstream service unavailable)`,
-      } as typeof message,
-    };
-  });
 
   // PI_OFFLINE: pi skips its own startup catalog refresh, but this proxy is
   // LAN/VPN-only — keep the cache sync live even then (same policy as the
