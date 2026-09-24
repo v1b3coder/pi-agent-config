@@ -66,6 +66,8 @@ import { getModels, getProviders } from "@earendil-works/pi-ai/compat";
 import { getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const PROVIDER = "litellm";
+/** LiteLLM wording for "the model behind the proxy is down". */
+const UPSTREAM_UNAVAILABLE = /no (healthy )?deployments?/i;
 const ENV_BASE_URL = "LITELLM_BASE_URL";
 const ENV_API_KEY = "LITELLM_API_KEY";
 const ENV_MAX_VLLM_OUTPUT_TOKENS = "LITELLM_MAX_VLLM_OUTPUT_TOKENS";
@@ -393,6 +395,25 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     );
   }
   register();
+
+  // LiteLLM reports an upstream/deployment outage as HTTP 400 BadRequestError
+  // ("There are no healthy deployments for this model"). Pi's retry classifier
+  // only knows generic 5xx/timeout wording, so a dead model behind a healthy
+  // proxy would stop the run instead of entering Pi's exponential backoff. Tag the
+  // finalized error as an upstream outage; quota/billing errors are matched by Pi
+  // first and stay terminal.
+  pi.on("message_end", (event) => {
+    const message = event.message;
+    if (message.role !== "assistant" || message.stopReason !== "error" || !message.errorMessage) return;
+    if (message.provider !== PROVIDER) return;
+    if (!UPSTREAM_UNAVAILABLE.test(message.errorMessage)) return;
+    return {
+      message: {
+        ...message,
+        errorMessage: `${message.errorMessage} (upstream service unavailable)`,
+      } as typeof message,
+    };
+  });
 
   // PI_OFFLINE: pi skips its own startup catalog refresh, but this proxy is
   // LAN/VPN-only — keep the cache sync live even then (same policy as the
