@@ -50,7 +50,7 @@ type AgentBlock = AssistantBlock | ToolBlock;
 interface AgentState {
   agent: string;
   task: string;
-  status: "running" | "done" | "error";
+  status: "queued" | "running" | "done" | "error";
   blocks: AgentBlock[];
   version: number;
 }
@@ -72,6 +72,82 @@ let subagentChildCount = 0;
 // Global sequence for agent state keys — identical agent+task pairs running
 // twice in parallel must not collide (states would overwrite each other)
 let taskKeySeq = 0;
+
+// ── Global concurrency limiter ─────────────────────────────────────
+// At most MAX_PARALLEL child sessions run at once. Further spawns wait in a
+// FIFO queue and are handed a slot directly when a running child finishes.
+// PI_SUBAGENT_MAX_PARALLEL: unset/blank/invalid → DEFAULT_MAX_PARALLEL,
+// "0" → unlimited (pre-queue behavior).
+const SUBAGENT_MAX_PARALLEL_ENV = "PI_SUBAGENT_MAX_PARALLEL";
+const DEFAULT_MAX_PARALLEL = 4;
+
+function parseMaxParallel(raw: string | undefined): number {
+  if (raw === undefined || raw.trim() === "") return DEFAULT_MAX_PARALLEL;
+  const n = Number.parseInt(raw.trim(), 10);
+  if (!Number.isFinite(n) || n < 0) return DEFAULT_MAX_PARALLEL;
+  return n === 0 ? Number.POSITIVE_INFINITY : n;
+}
+
+const MAX_PARALLEL = parseMaxParallel(process.env[SUBAGENT_MAX_PARALLEL_ENV]);
+const MAX_PARALLEL_LABEL =
+  MAX_PARALLEL === Number.POSITIVE_INFINITY ? "unlimited" : String(MAX_PARALLEL);
+
+interface SlotWaiter {
+  grant: () => void;
+  cancel: (err: Error) => void;
+}
+
+let runningChildren = 0;
+const slotWaitQueue: SlotWaiter[] = [];
+
+/**
+ * Waits for a free child slot. Resolves `true` if the caller had to queue.
+ * Rejects if `signal` aborts while waiting. On resolve the caller MUST call
+ * releaseSlot() exactly once when the child finishes.
+ */
+function acquireSlot(signal: AbortSignal | undefined): Promise<boolean> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new Error("cancelled before start"));
+      return;
+    }
+    let queued = false;
+    let settled = false;
+    const waiter: SlotWaiter = {
+      grant: () => {
+        if (settled) return;
+        settled = true;
+        signal?.removeEventListener("abort", onAbort);
+        resolve(queued);
+      },
+      cancel: (err: Error) => {
+        if (settled) return;
+        settled = true;
+        signal?.removeEventListener("abort", onAbort);
+        const idx = slotWaitQueue.indexOf(waiter);
+        if (idx !== -1) slotWaitQueue.splice(idx, 1);
+        reject(err);
+      },
+    };
+    const onAbort = () => waiter.cancel(new Error("cancelled while queued"));
+
+    if (runningChildren < MAX_PARALLEL) {
+      runningChildren++;
+      waiter.grant();
+      return;
+    }
+    queued = true;
+    slotWaitQueue.push(waiter);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+/** Frees a slot, handing it directly to the next waiter (FIFO) if any. */
+function releaseSlot(): void {
+  const next = slotWaitQueue.shift();
+  if (next) next.grant();
+  else runningChildren--;
+}
 
 // ── Peek overlay component ─────────────────────────────────────────
 
@@ -137,6 +213,7 @@ function resultBg(isError: boolean, theme: Theme): BgFn {
 
 /** Last human-meaningful line of an agent's activity, for the footer widget. */
 function lastSnippet(state: AgentState): string {
+  if (state.status === "queued") return "waiting for a free slot";
   for (let i = state.blocks.length - 1; i >= 0; i--) {
     const b = state.blocks[i]!;
     if (b.kind === "tool") {
@@ -307,6 +384,10 @@ class AgentViewer {
     const taskLine = `Task: ${(state.task.split("\n")[0] ?? "").trim()}`;
     lines.push(this.theme.fg("dim", truncateToWidth(taskLine, Math.max(1, width - 1))));
     lines.push("");
+    if (state.status === "queued") {
+      lines.push(this.theme.fg("dim", "\u23f3 waiting for a free slot\u2026"));
+      lines.push("");
+    }
 
     state.blocks.forEach((block, bi) => {
       let entry = perAgent.get(bi);
@@ -342,7 +423,13 @@ class AgentViewer {
     // ── Tab bar ──
     const tabs = this.order.map((key, i) => {
       const st = this.states.get(key);
-      const icon = st?.status === "done" ? "\u2713" : st?.status === "error" ? "\u2717" : "\u25c9";
+      const icon = st?.status === "done"
+        ? "\u2713"
+        : st?.status === "error"
+          ? "\u2717"
+          : st?.status === "queued"
+            ? "\u23f3"
+            : "\u25c9";
       const label = `${i + 1} ${icon} ${st?.agent ?? key}`;
       return i === this.selectedIndex ? `\x1b[7m ${label} \x1b[27m` : ` ${label} `;
     });
@@ -462,7 +549,7 @@ async function spawnChild(
   signal: AbortSignal | undefined,
   state: AgentState,
   thinkingLevel: NonNullable<Parameters<typeof createAgentSession>[0]>["thinkingLevel"],
-  onTick?: () => void,
+  onTick?: (force?: boolean) => void,
 ): Promise<string> {
   const def = AGENTS[agentName];
   if (!def) throw new Error(`Unknown agent: ${agentName}`);
@@ -476,24 +563,40 @@ async function spawnChild(
   const agentDir = getAgentDir();
   const settingsManager = SettingsManager.create(ctx.cwd, agentDir);
 
-  // Mark the child BEFORE reloading resources so the subagent extension's own
-  // factory (and any other extension honoring the marker) skips registration.
-  // Ref-counted so parallel children keep the marker until the last one exits.
-  subagentChildCount++;
-  process.env[SUBAGENT_CHILD_ENV] = "1";
-
-  // Extensions are NOT loaded into the child. Extension factories hold
-  // module-level state and register on a shared runtime, so binding the full set
-  // inside a second in-process session corrupts the PARENT session's extensions.
-  // Only the built-in tools are needed for subagent work.
-  const resourceLoader = new DefaultResourceLoader({
-    cwd: ctx.cwd,
-    agentDir,
-    settingsManager,
-    noExtensions: true,
-  });
+  // Guard flags so the finally below only unwinds what was actually taken.
+  let slotAcquired = false;
+  let childMarked = false;
 
   try {
+    // Wait for a free slot before allocating any child resources. Rejects if
+    // the run is cancelled while queued.
+    const queued = await acquireSlot(signal);
+    slotAcquired = true;
+    if (signal?.aborted) throw new Error("cancelled before start");
+    // Force a widget refresh: the state changed from queued → running (for tasks
+    // that got a slot immediately, and for those that just left the queue).
+    state.status = "running";
+    state.version++;
+    onTick?.(true);
+
+    // Mark the child BEFORE reloading resources so the subagent extension's own
+    // factory (and any other extension honoring the marker) skips registration.
+    // Ref-counted so parallel children keep the marker until the last one exits.
+    subagentChildCount++;
+    childMarked = true;
+    process.env[SUBAGENT_CHILD_ENV] = "1";
+
+    // Extensions are NOT loaded into the child. Extension factories hold
+    // module-level state and register on a shared runtime, so binding the full set
+    // inside a second in-process session corrupts the PARENT session's extensions.
+    // Only the built-in tools are needed for subagent work.
+    const resourceLoader = new DefaultResourceLoader({
+      cwd: ctx.cwd,
+      agentDir,
+      settingsManager,
+      noExtensions: true,
+    });
+
     await resourceLoader.reload();
 
     // The child loader skips extensions, so the parent's registered extension
@@ -686,10 +789,13 @@ async function spawnChild(
       session.dispose();
     }
   } finally {
-    subagentChildCount--;
-    if (subagentChildCount === 0) {
-      delete process.env[SUBAGENT_CHILD_ENV];
+    if (childMarked) {
+      subagentChildCount--;
+      if (subagentChildCount === 0) {
+        delete process.env[SUBAGENT_CHILD_ENV];
+      }
     }
+    if (slotAcquired) releaseSlot();
   }
 }
 
@@ -764,7 +870,8 @@ export default function (pi: ExtensionAPI) {
       "Single: { task, agent }. Parallel: { tasks: [{agent, task}, ...] }.\n" +
       "Builtin agents: reviewer (code review), scout (codebase recon),\n" +
       "researcher (web research), context-builder (analysis),\n" +
-      "worker (plan implementation), delegate (generic).",
+      "worker (plan implementation), delegate (generic).\n" +
+      `More than ${SUBAGENT_MAX_PARALLEL_ENV} (default ${DEFAULT_MAX_PARALLEL}, 0 = unlimited) agents queue until a slot frees up.`,
 
     parameters: Type.Object({
       task: Type.Optional(Type.String({
@@ -821,7 +928,7 @@ export default function (pi: ExtensionAPI) {
         agentStates.set(taskKeys[i]!, {
           agent: t.agent,
           task: t.task,
-          status: "running",
+          status: "queued",
           blocks: [],
           version: 0,
         });
@@ -835,31 +942,45 @@ export default function (pi: ExtensionAPI) {
       let lastWidgetUpdate = 0;
       const updateWidget = () => {
         const lines: string[] = [];
+        let queuedCount = 0;
         for (const [, state] of agentStates) {
-          const icon = state.status === "done" ? "✓" : state.status === "error" ? "✗" : "◉";
+          if (state.status === "queued") queuedCount++;
+          const icon = state.status === "done"
+            ? "✓"
+            : state.status === "error"
+              ? "✗"
+              : state.status === "queued"
+                ? "⏳"
+                : "◉";
           const snippet = lastSnippet(state);
           const cut = snippet.length > 55 ? snippet.slice(0, 52) + "..." : snippet;
           lines.push(`${icon} ${state.agent}: ${cut}`);
         }
         if (lines.length > 0) {
+          if (queuedCount > 0) {
+            lines.push(`⏳ ${queuedCount} queued · max ${MAX_PARALLEL_LABEL} parallel`);
+          }
           lines.push("Alt+O: agent tabs");
         }
         ctx.ui.setWidget("subagent", lines);
       };
 
+      updateWidget();
+
       if (tasks.length > 1) {
         onUpdate?.({ content: [{ type: "text",
-          text: `→ running ${tasks.length} agents concurrently...` }], details: {} });
+          text: `→ starting ${tasks.length} agents (max ${MAX_PARALLEL_LABEL} in parallel)...` }], details: {} });
       }
 
       const results = await Promise.all(
         tasks.map(async (t, i) => {
           const key = taskKeys[i]!;
           try {
-            const text = await spawnChild(t.agent, t.task, ctx, signal, agentStates.get(key)!, pi.getThinkingLevel(), () => {
-              // Throttle widget updates to ~150ms intervals
+            const text = await spawnChild(t.agent, t.task, ctx, signal, agentStates.get(key)!, pi.getThinkingLevel(), (force) => {
+              // Throttle widget updates to ~150ms intervals; slot transitions
+              // (queued → running) bypass the throttle.
               const now = Date.now();
-              if (now - lastWidgetUpdate > 150) {
+              if (force || now - lastWidgetUpdate > 150) {
                 lastWidgetUpdate = now;
                 updateWidget();
               }
@@ -876,7 +997,7 @@ export default function (pi: ExtensionAPI) {
       // Mark done/error, final widget update, then clear
       for (const key of taskKeys) {
         const state = agentStates.get(key);
-        if (state && state.status === "running") state.status = "done";
+        if (state && (state.status === "running" || state.status === "queued")) state.status = "done";
       }
       updateWidget();
       entry.cleanupTimer = setTimeout(() => {
@@ -960,5 +1081,10 @@ export default function (pi: ExtensionAPI) {
     activeRuns.length = 0;
     subagentChildCount = 0;
     delete process.env[SUBAGENT_CHILD_ENV];
+    // Cancel queued spawns. runningChildren is intentionally NOT reset: in-flight
+    // children are still holding slots and will release them in their finally.
+    for (const waiter of slotWaitQueue.splice(0)) {
+      waiter.cancel(new Error("session shut down"));
+    }
   });
 }
