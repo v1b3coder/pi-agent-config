@@ -25,6 +25,9 @@ const CLEAR_WORDS = new Set(["clear", "cancel", "abort", "end", "quit", "reset"]
 const RESUME_WORDS = new Set(["resume", "continue"]);
 // An auditor run must not hang update_goal forever if its model loops on tool calls.
 const AUDITOR_TIMEOUT_MS = 100 * 60 * 1000;
+// UI dialogs need a timeout: RPC/IDE clients may never answer a request, and an
+// unanswered confirm would hang the tool (or the /goal command) forever.
+const DIALOG_TIMEOUT_MS = 5 * 60 * 1000;
 // Consecutive audit failures (rejection or error) after which the goal auto-pauses.
 // Deliberately high: complex goals may legitimately need many audit rounds; this is
 // only a last-resort catch for a runaway loop.
@@ -325,7 +328,7 @@ export default function piGoalAudit(pi: ExtensionAPI) {
 			completionSummary: Type.Optional(Type.String({ description: "Summary of what was completed and evidence supporting the claim; the blocker reason when status is 'blocked'." })),
 		}),
 		executionMode: "sequential",
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 			const effectiveStatus = params.status ?? "complete";
 			if (effectiveStatus !== "complete" && effectiveStatus !== "blocked") {
 				return { content: [{ type: "text", text: 'update_goal only accepts status="complete" or status="blocked".' }], isError: true };
@@ -359,6 +362,11 @@ export default function piGoalAudit(pi: ExtensionAPI) {
 
 			const abortController = new AbortController();
 			let unsubTerminal: (() => void) | null = null;
+			// The tool's run signal fires for any user abort, including the RPC/IDE
+			// `abort` command where onTerminalInput never runs. Without this the
+			// auditor session kept running and update_goal blocked until it finished.
+			const onRunAbort = () => abortController.abort();
+			signal?.addEventListener("abort", onRunAbort, { once: true });
 			// onTerminalInput is TUI-only: RPC exposes it but it never fires, so
 			// `hasUI` alone would silently swallow Esc. Guard by mode instead.
 			if (ctx.mode === "tui" && ctx.ui.onTerminalInput) {
@@ -375,13 +383,25 @@ export default function piGoalAudit(pi: ExtensionAPI) {
 			try {
 				auditorResult = await runAuditor(ctx, goal, completionSummary, pi.getThinkingLevel(), abortController.signal);
 			} finally {
+				signal?.removeEventListener("abort", onRunAbort);
 				unsubTerminal?.();
 			}
 
-			// ── Handle abort (Esc pressed during audit) ────────────────────
+			// ── Handle abort (Esc in TUI, abort command in RPC/IDE) ────────
 			if (abortController.signal.aborted) {
+				// A run abort (RPC/IDE `abort` command) means stop, not complete:
+				// pause the goal and do not ask to bypass the audit.
+				if (signal?.aborted) {
+					const next: GoalState = { ...goal, status: "paused", updatedAt: Date.now() };
+					persist(pi, ctx, next);
+					emit(pi, "paused", next);
+					return {
+						content: [{ type: "text", text: "Goal audit aborted (run interrupted). Auto-continuation stopped." }],
+						details: { goal: next },
+					};
+				}
 				const bypass = ctx.hasUI
-					? await ctx.ui.confirm("Audit interrupted", "Complete without audit?")
+					? await ctx.ui.confirm("Audit interrupted", "Complete without audit?", { timeout: DIALOG_TIMEOUT_MS })
 					: false;
 				if (bypass) {
 					const next: GoalState = { ...goal, status: "complete", updatedAt: Date.now() };
@@ -519,7 +539,7 @@ export default function piGoalAudit(pi: ExtensionAPI) {
 			if (parsed.error) { ctx.ui.notify(parsed.error, "warning"); return; }
 			if (!parsed.objective) { ctx.ui.notify(`Usage: /${COMMAND_NAME} [--tokens 50k] <objective>`, "warning"); return; }
 			if (goal && goal.status !== "complete") {
-				const ok = await ctx.ui.confirm("Replace goal?", `Current: ${goal.objective}\n\nNew: ${parsed.objective}`);
+				const ok = await ctx.ui.confirm("Replace goal?", `Current: ${goal.objective}\n\nNew: ${parsed.objective}`, { timeout: DIALOG_TIMEOUT_MS });
 				if (!ok) return;
 			}
 			const next: GoalState = {
