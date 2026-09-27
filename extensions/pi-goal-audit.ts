@@ -24,9 +24,11 @@ const PAUSE_WORDS = new Set(["pause", "stop", "halt"]);
 const CLEAR_WORDS = new Set(["clear", "cancel", "abort", "end", "quit", "reset"]);
 const RESUME_WORDS = new Set(["resume", "continue"]);
 // An auditor run must not hang update_goal forever if its model loops on tool calls.
-const AUDITOR_TIMEOUT_MS = 10 * 60 * 1000;
+const AUDITOR_TIMEOUT_MS = 100 * 60 * 1000;
 // Consecutive audit failures (rejection or error) after which the goal auto-pauses.
-const MAX_CONSECUTIVE_AUDIT_FAILURES = 3;
+// Deliberately high: complex goals may legitimately need many audit rounds; this is
+// only a last-resort catch for a runaway loop.
+const MAX_CONSECUTIVE_AUDIT_FAILURES = 20;
 
 import { parseTokenBudget, tokenDelta, fmtTokens, fmtTime, truncate, evtLabel, usageStr, statusLine as sl, contPrompt, budgetStop, contentFor as cf, buildAuditPrompt, type GoalEventKind, type GoalState } from "./pi-goal-audit-helpers.ts";
 
