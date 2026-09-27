@@ -17,15 +17,30 @@ const CUSTOM_TYPE = "pi-goal";
 const EVENT_TYPE = "pi-goal-event";
 const GOAL_TOOL_NAMES = ["get_goal", "update_goal"];
 const COMMAND_NAME = "goal";
+// Control words users may type as `/goal <word>` while a loop is running. Without
+// these, `/goal stop` replaced the goal with an objective named "stop" and the
+// continuation loop became impossible to stop from the command line.
+const PAUSE_WORDS = new Set(["pause", "stop", "halt"]);
+const CLEAR_WORDS = new Set(["clear", "cancel", "abort", "end", "quit", "reset"]);
+const RESUME_WORDS = new Set(["resume", "continue"]);
+// An auditor run must not hang update_goal forever if its model loops on tool calls.
+const AUDITOR_TIMEOUT_MS = 10 * 60 * 1000;
+// Consecutive audit failures (rejection or error) after which the goal auto-pauses.
+const MAX_CONSECUTIVE_AUDIT_FAILURES = 3;
 
-import { parseTokenBudget, tokenDelta, fmtTokens, fmtTime, truncate, evtLabel, usageStr, statusLine as sl, contPrompt, budgetStop, contentFor as cf, buildAuditPrompt, type GoalStatus, type GoalEventKind, type GoalState } from "./pi-goal-audit-helpers.ts";
+import { parseTokenBudget, tokenDelta, fmtTokens, fmtTime, truncate, evtLabel, usageStr, statusLine as sl, contPrompt, budgetStop, contentFor as cf, buildAuditPrompt, type GoalEventKind, type GoalState } from "./pi-goal-audit-helpers.ts";
 
 // ── State ────────────────────────────────────────────────────────────────
 
 let goal: GoalState | null = null;
 let statusBarEnabled = true;
 let activeTurnStartedAt: number | null = null;
-let continuationQueued = false;
+// True when the current run executed at least one real work tool (not a goal
+// tool). Continuations are only queued for runs that made progress; this is what
+// stops the "agent answers with text only and the loop continues anyway" failure.
+let goalWorkToolCalled = false;
+// Audit failures since the last approval. A run of failures auto-pauses the goal.
+let consecutiveAuditFailures = 0;
 
 // ── Message builder ──────────────────────────────────────────────────────
 
@@ -76,14 +91,15 @@ function saveSettings(pi: ExtensionAPI, ctx: ExtensionContext) {
 	updateStatus(goal, ctx);
 }
 
-function queueCont(pi: ExtensionAPI, state: GoalState) {
-	if (continuationQueued || state.status !== "active") return;
-	continuationQueued = true;
-	queueMicrotask(() => {
-		continuationQueued = false;
-		if (!goal || goal.id !== state.id || goal.status !== "active") return;
-		emit(pi, "continuation", goal, { triggerTurn: true, deliverAs: "followUp" });
-	});
+function pauseGoal(pi: ExtensionAPI, ctx: ExtensionContext, reason: string) {
+	if (!goal || goal.status !== "active") return;
+	const next: GoalState = { ...goal, status: "paused", updatedAt: Date.now() };
+	persist(pi, ctx, next);
+	emit(pi, "paused", next);
+	ctx.ui.notify(
+		`‖ Goal auto-paused: ${reason}\nObjective: ${truncate(next.objective)}\nUse /${COMMAND_NAME} resume to continue, or /${COMMAND_NAME} clear to stop.`,
+		"warning",
+	);
 }
 
 // ── Auditor ──────────────────────────────────────────────────────────────
@@ -123,6 +139,9 @@ async function runAuditor(ctx: ExtensionContext, state: GoalState, claim: string
 	// this the auditor silently returns an empty report and update_goal reports a
 	// misleading "rejected" with no findings.
 	let overflowError: string | undefined;
+	// Set when the auditor does not finish in time. A model that loops on tool
+	// calls would otherwise block update_goal forever.
+	let timedOut = false;
 	const AUDITOR_STATUS_KEY = "pi-goal-auditor-stream";
 	let notifyTimer: ReturnType<typeof setTimeout> | null = null;
 	const flushNotify = () => {
@@ -201,22 +220,30 @@ async function runAuditor(ctx: ExtensionContext, state: GoalState, claim: string
 			}
 		});
 
+		const timeout = setTimeout(() => {
+			timedOut = true;
+			void session.abort();
+		}, AUDITOR_TIMEOUT_MS);
 		try {
 			await session.prompt(buildAuditPrompt(state, claim));
 			// Reasoning models sometimes loop on tool calls and end with no
 			// final text.  Ask once more, explicitly, for the verdict.
-			if (!/<(?:approved|disapproved)\s*\/>/.test(parts.join(""))) {
+			if (!timedOut && !/<(?:approved|disapproved)\s*\/>/.test(parts.join(""))) {
 				await session.prompt(
 					"Stop inspecting now and report. End with exactly <approved/> or <disapproved/>.",
 				);
 			}
 		} finally {
+			clearTimeout(timeout);
 			if (notifyTimer) clearTimeout(notifyTimer);
 			unsub();
 			signal?.removeEventListener("abort", killSession);
 			ctx.ui.setStatus(AUDITOR_STATUS_KEY, "");
 		}
 
+		if (timedOut) {
+			return { approved: false, output: parts.join("").trim(), error: `auditor timed out after ${Math.round(AUDITOR_TIMEOUT_MS / 60000)} minutes` };
+		}
 		if (overflowError) {
 			return { approved: false, output: parts.join("").trim(), error: `context overflow: ${overflowError}` };
 		}
@@ -238,6 +265,9 @@ async function runAuditor(ctx: ExtensionContext, state: GoalState, claim: string
 	} catch (err) {
 		if (notifyTimer) clearTimeout(notifyTimer);
 		ctx.ui.setStatus(AUDITOR_STATUS_KEY, "");
+		if (timedOut) {
+			return { approved: false, output: parts.join("").trim(), error: `auditor timed out after ${Math.round(AUDITOR_TIMEOUT_MS / 60000)} minutes` };
+		}
 		return { approved: false, output: parts.join("").trim(), error: err instanceof Error ? err.message : String(err) };
 	}
 }
@@ -280,22 +310,23 @@ export default function piGoalAudit(pi: ExtensionAPI) {
 	pi.registerTool(defineTool({
 		name: "update_goal",
 		label: "Update Goal",
-		description: "Mark the current goal complete. Launches an independent auditor subagent that inspects the workspace before the goal is marked complete.",
-		promptSnippet: "Mark the current goal complete after a strict completion audit.",
+		description: "Mark the current goal complete (audited) or blocked (pauses auto-continuation).",
+		promptSnippet: "Mark the current goal complete after a strict completion audit, or blocked when it cannot be achieved.",
 		promptGuidelines: [
-			"Call update_goal only when the goal objective is fully achieved and verified against concrete evidence.",
+			'Call update_goal with status "complete" only when the goal objective is fully achieved and verified against concrete evidence.',
 			"An independent auditor subagent will inspect the workspace before the goal is marked complete.",
-			"Do not call update_goal to pause, resume, abandon, or budget-limit a goal.",
+			'Call update_goal with status "blocked" and a completionSummary explaining the blocker when the goal cannot be achieved; this pauses the goal instead of looping.',
+			"Do not call update_goal to pause, resume, or budget-limit a goal.",
 		],
 		parameters: Type.Object({
-			status: Type.Optional(Type.String({ description: "Set to 'complete' when the objective is achieved." })),
-			completionSummary: Type.Optional(Type.String({ description: "Summary of what was completed and evidence supporting the claim." })),
+			status: Type.Optional(Type.String({ description: "Set to 'complete' when the objective is achieved, or 'blocked' when it cannot be achieved." })),
+			completionSummary: Type.Optional(Type.String({ description: "Summary of what was completed and evidence supporting the claim; the blocker reason when status is 'blocked'." })),
 		}),
 		executionMode: "sequential",
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const effectiveStatus = params.status ?? "complete";
-			if (effectiveStatus !== "complete") {
-				return { content: [{ type: "text", text: "update_goal only accepts status=complete." }], isError: true };
+			if (effectiveStatus !== "complete" && effectiveStatus !== "blocked") {
+				return { content: [{ type: "text", text: 'update_goal only accepts status="complete" or status="blocked".' }], isError: true };
 			}
 			if (!goal) {
 				return { content: [{ type: "text", text: "No goal is set." }], isError: true };
@@ -305,6 +336,21 @@ export default function piGoalAudit(pi: ExtensionAPI) {
 			}
 
 			const completionSummary = params.completionSummary?.trim() ?? "";
+
+			// ── Blocked: the agent explicitly gives up instead of looping ─────
+			if (effectiveStatus === "blocked") {
+				if (!completionSummary) {
+					return { content: [{ type: "text", text: 'status="blocked" requires a completionSummary explaining the blocker.' }], isError: true };
+				}
+				const next: GoalState = { ...goal, status: "paused", updatedAt: Date.now() };
+				persist(pi, ctx, next);
+				emit(pi, "paused", next);
+				ctx.ui.notify(`‖ Goal paused (blocked): ${truncate(completionSummary)}`, "warning");
+				return {
+					content: [{ type: "text", text: `Goal paused: the agent reported it as blocked.\n\nReason: ${completionSummary}\n\nAuto-continuation stopped. Use /${COMMAND_NAME} resume to continue, or /${COMMAND_NAME} clear to remove the goal.` }],
+					details: { goal: next },
+				};
+			}
 
 			// ── Audit phase ────────────────────────────────────────────────
 			ctx.ui.notify("Auditor: inspecting workspace for completion evidence...", "info");
@@ -352,11 +398,20 @@ export default function piGoalAudit(pi: ExtensionAPI) {
 
 			// ── Handle auditor error ───────────────────────────────────────
 			if (auditorResult.error) {
+				consecutiveAuditFailures++;
 				const tail = auditorResult.output
 					? `\n\nAuditor output tail:\n${auditorResult.output.slice(-1500)}`
 					: "";
+				if (consecutiveAuditFailures >= MAX_CONSECUTIVE_AUDIT_FAILURES) {
+					const next: GoalState = { ...goal, status: "paused", updatedAt: Date.now() };
+					persist(pi, ctx, next);
+					emit(pi, "paused", next);
+				}
+				const capped = consecutiveAuditFailures >= MAX_CONSECUTIVE_AUDIT_FAILURES
+					? ` Auditor failed ${consecutiveAuditFailures} times in a row; auto-continuation paused. Use /${COMMAND_NAME} resume to keep trying, or /${COMMAND_NAME} clear to stop.`
+					: " Goal remains active.";
 				return {
-					content: [{ type: "text", text: `Auditor error: ${auditorResult.error}. Goal remains active.${tail}` }],
+					content: [{ type: "text", text: `Auditor error: ${auditorResult.error}.${capped}${tail}` }],
 					details: { goal },
 					isError: true,
 				};
@@ -364,6 +419,16 @@ export default function piGoalAudit(pi: ExtensionAPI) {
 
 			// ── Handle rejection ───────────────────────────────────────────
 			if (!auditorResult.approved) {
+				consecutiveAuditFailures++;
+				if (consecutiveAuditFailures >= MAX_CONSECUTIVE_AUDIT_FAILURES) {
+					const next: GoalState = { ...goal, status: "paused", updatedAt: Date.now() };
+					persist(pi, ctx, next);
+					emit(pi, "paused", next);
+					return {
+						content: [{ type: "text", text: `Goal audit rejected by independent auditor (${consecutiveAuditFailures} in a row). Auto-continuation paused to avoid an audit loop; use /${COMMAND_NAME} resume to keep trying, or /${COMMAND_NAME} clear to stop.\n\n${auditorResult.output}` }],
+						details: { goal: next },
+					};
+				}
 				return {
 					content: [{ type: "text", text: `Goal audit rejected by independent auditor.\n\n${auditorResult.output}\n\nGoal remains active. Address the auditor's findings and retry.` }],
 					details: { goal },
@@ -371,6 +436,7 @@ export default function piGoalAudit(pi: ExtensionAPI) {
 			}
 
 			// ── Approved ───────────────────────────────────────────────────
+			consecutiveAuditFailures = 0;
 			const now = Date.now();
 			const next: GoalState = { ...goal, status: "complete", updatedAt: now };
 			persist(pi, ctx, next);
@@ -397,49 +463,57 @@ export default function piGoalAudit(pi: ExtensionAPI) {
 
 	// ── /goal command ─────────────────────────────────────────────────────
 	pi.registerCommand(COMMAND_NAME, {
-		description: "Set, view, pause, resume, or clear a long-running goal",
+		description: "Set, view, pause/stop, resume, or clear/cancel a long-running goal",
 		getArgumentCompletions: (prefix) => {
-			const values = ["pause", "resume", "clear", "status", "statusbar", "statusbar on", "statusbar off"];
+			const values = ["pause", "stop", "resume", "clear", "cancel", "status", "statusbar", "statusbar on", "statusbar off"];
 			const filtered = values.filter((v) => v.startsWith(prefix));
 			return filtered.length ? filtered.map((v) => ({ value: v, label: v })) : null;
 		},
 		handler: async (args, ctx) => {
-			const trimmed = args.trim();
+			const raw = args.trim();
+			const control = raw.toLowerCase();
 			const now = Date.now();
 
-			if (!trimmed || trimmed === "status") {
-				if (!goal) ctx.ui.notify(`Usage: /${COMMAND_NAME} [--tokens 50k] <objective>`, "info");
-				else ctx.ui.notify(`${sl(goal, COMMAND_NAME)}\nObjective: ${goal.objective}\nStatus bar: ${statusBarEnabled ? "on" : "off"}`, "info");
+			if (!raw || control === "status") {
+				if (!goal) ctx.ui.notify(`Usage: /${COMMAND_NAME} [--tokens 50k] <objective>\nControls: pause|stop, resume, clear|cancel, status, statusbar`, "info");
+				else ctx.ui.notify(`${sl(goal, COMMAND_NAME)}\nObjective: ${goal.objective}\nStatus bar: ${statusBarEnabled ? "on" : "off"}\nControls: pause|stop, resume, clear|cancel`, "info");
 				return;
 			}
 
-			if (trimmed === "statusbar" || trimmed === "statusbar toggle" || trimmed === "statusbar on" || trimmed === "statusbar off") {
-				const [, value] = trimmed.split(/\s+/, 2);
+			if (control === "statusbar" || control === "statusbar toggle" || control === "statusbar on" || control === "statusbar off") {
+				const [, value] = control.split(/\s+/, 2);
 				statusBarEnabled = value === "on" ? true : value === "off" ? false : !statusBarEnabled;
 				saveSettings(pi, ctx);
 				ctx.ui.notify(`Goal status bar ${statusBarEnabled ? "enabled" : "disabled"}.`, "info");
 				return;
 			}
 
-			if (trimmed === "clear") {
+			if (CLEAR_WORDS.has(control)) {
 				if (!goal) { ctx.ui.notify("No goal is set.", "info"); return; }
 				const prev = goal;
+				consecutiveAuditFailures = 0;
+				goalWorkToolCalled = false;
 				persist(pi, ctx, null);
 				emit(pi, "cleared", prev);
+				ctx.ui.notify("Goal cleared. Auto-continuation stopped.", "info");
 				return;
 			}
 
-			if (trimmed === "pause" || trimmed === "resume") {
+			if (PAUSE_WORDS.has(control) || RESUME_WORDS.has(control)) {
 				if (!goal) { ctx.ui.notify("No goal is set.", "warning"); return; }
-				const status: GoalStatus = trimmed === "pause" ? "paused" : "active";
-				const next = { ...goal, status, updatedAt: now };
+				const resuming = RESUME_WORDS.has(control);
+				const next: GoalState = { ...goal, status: resuming ? "active" : "paused", updatedAt: now };
+				if (resuming) {
+					consecutiveAuditFailures = 0;
+					goalWorkToolCalled = false;
+				}
 				persist(pi, ctx, next);
-				emit(pi, status === "active" ? "resumed" : "paused", next);
-				if (status === "active" && ctx.isIdle()) queueCont(pi, next);
+				emit(pi, resuming ? "resumed" : "paused", next, resuming && ctx.isIdle() ? { triggerTurn: true } : undefined);
+				ctx.ui.notify(resuming ? "Goal resumed." : "Goal paused. Auto-continuation stopped.", "info");
 				return;
 			}
 
-			const parsed = parseTokenBudget(trimmed);
+			const parsed = parseTokenBudget(raw);
 			if (parsed.error) { ctx.ui.notify(parsed.error, "warning"); return; }
 			if (!parsed.objective) { ctx.ui.notify(`Usage: /${COMMAND_NAME} [--tokens 50k] <objective>`, "warning"); return; }
 			if (goal && goal.status !== "complete") {
@@ -457,6 +531,8 @@ export default function piGoalAudit(pi: ExtensionAPI) {
 				createdAt: now,
 				updatedAt: now,
 			};
+			consecutiveAuditFailures = 0;
+			goalWorkToolCalled = false;
 			persist(pi, ctx, next);
 			emit(pi, "active", next, { triggerTurn: ctx.isIdle() });
 		},
@@ -467,7 +543,8 @@ export default function piGoalAudit(pi: ExtensionAPI) {
 		const restored = restore(ctx);
 		goal = restored.goal;
 		statusBarEnabled = restored.statusBarEnabled;
-		continuationQueued = false;
+		goalWorkToolCalled = false;
+		consecutiveAuditFailures = 0;
 		activeTurnStartedAt = null;
 		syncTools(pi);
 		if (goal?.status === "active" && event.reason === "reload") {
@@ -486,6 +563,19 @@ export default function piGoalAudit(pi: ExtensionAPI) {
 				"info",
 			);
 		}
+	});
+
+	// A new low-level run starts. Reset the per-run progress flag.
+	pi.on("agent_start", () => {
+		goalWorkToolCalled = false;
+	});
+
+	// Any non-goal tool counts as real work for this run. Calling update_goal
+	// repeatedly is not progress and must not keep the loop alive.
+	pi.on("tool_execution_start", (event) => {
+		if (!goal || goal.status !== "active") return;
+		if (GOAL_TOOL_NAMES.includes(event.toolName)) return;
+		goalWorkToolCalled = true;
 	});
 
 	pi.on("turn_start", () => {
@@ -509,11 +599,36 @@ export default function piGoalAudit(pi: ExtensionAPI) {
 		persist(pi, ctx, next);
 		if (next.status === "budget_limited") {
 			emit(pi, "budget_limited", next, { triggerTurn: true, deliverAs: "followUp" });
+			return;
+		}
+		// A user interrupt (Esc) stops the loop instead of continuing it.
+		if (event.outcome === "aborted") {
+			pauseGoal(pi, ctx, "the turn was interrupted (Esc)");
 		}
 	});
 
-	pi.on("agent_end", (_event, ctx) => {
+	// Final actionable boundary: decide whether Pi runs one more model request.
+	// A run only continues when it did real work; otherwise the goal would keep
+	// re-triggering itself after text-only replies (the reported infinite loop).
+	pi.on("agent_before_settle", (event, ctx) => {
 		if (!goal || goal.status !== "active" || ctx.hasPendingMessages()) return;
-		queueCont(pi, goal);
+		if (event.outcome === "aborted") return; // turn_end already paused the goal
+		if (!goalWorkToolCalled) {
+			ctx.ui.notify(
+				`‖ Goal auto-continuation stopped: the last turn made no progress.\nObjective: ${truncate(goal.objective)}\nUse /${COMMAND_NAME} resume to continue, or /${COMMAND_NAME} clear to stop.`,
+				"warning",
+			);
+			return;
+		}
+		return {
+			entries: [{
+				type: "custom_message",
+				customType: EVENT_TYPE,
+				content: msgFor("continuation", goal),
+				display: true,
+				details: { kind: "continuation", goal, timestamp: Date.now() },
+			}],
+			continue: true,
+		};
 	});
 }

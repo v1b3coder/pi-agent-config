@@ -109,6 +109,7 @@ export function contPrompt(state: GoalState, toolName = "update_goal"): string {
 		"",
 		`When achieved, call ${toolName} with status "complete".`,
 		"This launches an independent auditor subagent that inspects the workspace before marking complete.",
+		`If the goal cannot be achieved or is blocked, call ${toolName} with status "blocked" and a reason instead of looping.`,
 		`Do not call ${toolName} unless the goal is actually complete.`,
 		"Do not mark complete merely because the budget is nearly exhausted.",
 	].join("\n");

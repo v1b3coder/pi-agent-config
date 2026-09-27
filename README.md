@@ -166,7 +166,7 @@ Pi starts with the current shell environment as a base. The `_env-injector` exte
 
 | Extension | Description |
 |---|---|
-| **`pi-goal-audit.ts`** & **`pi-goal-audit-helpers.ts`** | Custom fork of Michaelliv/pi-goal that adds an **independent auditor subagent** before marking goals complete. The auditor uses read-only tools (read, grep, find, ls, bash) and must output `<approved/>` for the goal to pass. Supports `--tokens` budget flag, continuation prompts, and token/time tracking. `/goal` command manages goal lifecycle (set, pause, resume, clear, complete). |
+| **`pi-goal-audit.ts`** & **`pi-goal-audit-helpers.ts`** | Custom fork of Michaelliv/pi-goal that adds an **independent auditor subagent** before marking goals complete. The auditor uses read-only tools (read, grep, find, ls, bash) and must output `<approved/>` for the goal to pass. Supports `--tokens` budget flag, continuation prompts, and token/time tracking. `/goal` command manages goal lifecycle (set, pause/stop, resume, clear/cancel, complete, blocked). Auto-continuation stops when a run makes no progress, pauses the goal on Esc, and pauses after repeated audit failures; the auditor has a 10-minute timeout. |
 
 ### 🎛️ Tool & Skill Presets
 
