@@ -36,7 +36,8 @@
     "!npm:pi-agentic-compaction",
     "!npm:pi-openplan",
     "npm:pi-interactive-shell",
-    "npm:@dreki-gg/pi-context7"
+    "npm:@dreki-gg/pi-context7",
+    "npm:@mcuste/pi-diagram"
   ],
   "pi-agentic-compaction": {
     "models": [
