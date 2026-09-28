@@ -390,7 +390,7 @@ export default function (pi: ExtensionAPI) {
 			"Generate an image from a text prompt, or edit images, on the local ComfyUI instance (Qwen-Image 2.1) and return the result inline. " +
 			"Text-to-image defaults to 1024x1024 at 30 steps. " +
 			"Pass reference_images (local file paths) to switch to image editing: image_1 is the edit target and sets the output size, image_2..image_16 are references, and the prompt refers to them as <image1>, <image2>, ... " +
-			"Image editing has no denoise knob (it stays 1.0) and ignores width/height; resolution is a pixel budget for resizing the references (0 = native size). " +
+			"Image editing has no denoise knob (it stays 1.0) and ignores width/height; the output size follows image_1. resolution is a pixel budget for resizing the references (0 = native size). " +
 			"Low step counts fail silently: ComfyUI reports success and writes a PNG, but the image is washed out and under-resolved, so keep steps at 30 or higher. " +
 			"Images below roughly 1 MP are also washed out even at 30 steps. " +
 			"By default PNGs are written to UID-scoped scratch space under tmp, not asset storage; copy a keeper into the project or set COMFYUI_OUTPUT_DIR to generate into it.",
@@ -399,7 +399,7 @@ export default function (pi: ExtensionAPI) {
 			"generate_image defaults to 30 steps; lower values silently produce washed-out images.",
 			"generate_image writes to tmp scratch space by default; copy keepers into the project or set COMFYUI_OUTPUT_DIR.",
 			"To edit images, pass reference_images (local file paths): image_1 is the edit target and sets the output size, image_2..image_16 are references. In the prompt, refer to them as <image1>, <image2>, ...",
-			"Do not pass width/height with reference_images, and do not try to lower denoise: Qwen-Image 2.1 edit is not Stable Diffusion img2img and keeps denoise at 1.0.",
+			"With reference_images, width/height have no effect (the output size follows image_1), and do not try to lower denoise: Qwen-Image 2.1 edit is not Stable Diffusion img2img and keeps denoise at 1.0.",
 			"Run one generate_image call at a time; the ComfyUI GPU is shared with other services.",
 		],
 		parameters: Type.Object({
@@ -412,39 +412,49 @@ export default function (pi: ExtensionAPI) {
 					minItems: 1,
 					maxItems: MAX_REFERENCES,
 					description:
-						"Local file paths for image editing (Qwen-Image 2.1 edit). image_1 is the edit target and sets the output size; image_2..image_16 are references. Cannot be combined with width/height.",
+						"Local file paths for image editing (Qwen-Image 2.1 edit). image_1 is the edit target and sets the output size; image_2..image_16 are references. width/height have no effect in this mode.",
 				}),
 			),
-			resolution: Type.Integer({
-				description:
-					"Image editing only: reference images are resized to about resolution x resolution pixels (multiple of 32, aspect ratio preserved); 0 keeps each reference at native size. Capped at 2048 for the shared GPU.",
-				minimum: 0,
-				maximum: EDIT_RESOLUTION_MAX,
-				default: EDIT_RESOLUTION_DEFAULT,
-			}),
-			width: Type.Integer({
-				description: "Text-to-image only: image width in pixels, snapped to a multiple of 8",
-				minimum: DIMENSION_MIN,
-				maximum: DIMENSION_MAX,
-				default: DEFAULT_WIDTH,
-			}),
-			height: Type.Integer({
-				description: "Text-to-image only: image height in pixels, snapped to a multiple of 8",
-				minimum: DIMENSION_MIN,
-				maximum: DIMENSION_MAX,
-				default: DEFAULT_HEIGHT,
-			}),
-			steps: Type.Integer({
-				description:
-					"Denoising steps. Low values silently produce washed-out images; do not go below the default.",
-				minimum: 1,
-				default: DEFAULT_STEPS,
-			}),
-			seed: Type.Integer({
-				description: "Random seed; omit for a random one",
-				minimum: 0,
-				maximum: Number.MAX_SAFE_INTEGER,
-			}),
+			resolution: Type.Optional(
+				Type.Integer({
+					description:
+						"Image editing only: reference images are resized to about resolution x resolution pixels (multiple of 32, aspect ratio preserved); 0 keeps each reference at native size. Capped at 2048 for the shared GPU.",
+					minimum: 0,
+					maximum: EDIT_RESOLUTION_MAX,
+					default: EDIT_RESOLUTION_DEFAULT,
+				}),
+			),
+			width: Type.Optional(
+				Type.Integer({
+					description: "Text-to-image only: image width in pixels, snapped to a multiple of 8. Ignored with reference_images.",
+					minimum: DIMENSION_MIN,
+					maximum: DIMENSION_MAX,
+					default: DEFAULT_WIDTH,
+				}),
+			),
+			height: Type.Optional(
+				Type.Integer({
+					description: "Text-to-image only: image height in pixels, snapped to a multiple of 8. Ignored with reference_images.",
+					minimum: DIMENSION_MIN,
+					maximum: DIMENSION_MAX,
+					default: DEFAULT_HEIGHT,
+				}),
+			),
+			steps: Type.Optional(
+				Type.Integer({
+					description:
+						"Denoising steps. Low values silently produce washed-out images; do not go below the default.",
+					minimum: 1,
+					default: DEFAULT_STEPS,
+				}),
+			),
+			seed: Type.Optional(
+				Type.Integer({
+					description: "Random seed; omit for a random one",
+					minimum: 0,
+					maximum: Number.MAX_SAFE_INTEGER,
+				}),
+			),
 		}),
 
 		renderResult(result, _options, theme, context) {
@@ -483,16 +493,6 @@ export default function (pi: ExtensionAPI) {
 
 				const referenceImages = params.reference_images ?? [];
 				const isEdit = referenceImages.length > 0;
-
-				// Correct the Stable-Diffusion img2img prior before doing any work.
-				if (isEdit && (params.width !== undefined || params.height !== undefined)) {
-					throw new Error(
-						"width/height are text-to-image only. With reference_images the output size follows image_1; remove width/height.",
-					);
-				}
-				if (!isEdit && params.resolution !== undefined) {
-					throw new Error("resolution only applies with reference_images; remove it for text-to-image.");
-				}
 
 				const steps = params.steps ?? envInt("COMFYUI_STEPS", DEFAULT_STEPS);
 				const seed = params.seed ?? randomInt(0, 2 ** 48 - 1);
