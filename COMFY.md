@@ -1,6 +1,6 @@
 # `generate_image` — ComfyUI text-to-image tool for Pi
 
-**Status: proposal, not implemented.**
+**Status: implemented** in `~/.pi/agent/extensions/generate-image.ts`.
 
 A single scoped Pi tool that generates images from text prompts on the local
 ComfyUI instance. Replaces fragile hand-rolled `curl` calls with one verified code
