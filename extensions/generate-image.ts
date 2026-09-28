@@ -14,10 +14,12 @@
  *   COMFYUI_TIMEOUT_SECONDS   poll timeout (default: 300)
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { getCapabilities, hyperlink, Text } from "@earendil-works/pi-tui";
 import { randomInt, randomUUID } from "node:crypto";
 import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { Type } from "typebox";
 
 const CLIP_TYPE = "qwen_image";
@@ -268,6 +270,33 @@ export default function (pi: ExtensionAPI) {
 				maximum: Number.MAX_SAFE_INTEGER,
 			}),
 		}),
+
+		renderResult(result, _options, theme, context) {
+			const text = (context.lastComponent ?? new Text("", 0, 0)) as Text;
+			const details = result.details as GenerateImageDetails | undefined;
+
+			// Errors and in-flight updates have no path yet; show their message as-is.
+			if (!details?.path) {
+				const message = result.content
+					.filter((block) => block.type === "text")
+					.map((block) => block.text ?? "")
+					.join("\n");
+				text.setText(context.isError ? theme.fg("error", message) : message);
+				return text;
+			}
+
+			// OSC 8 makes the path open in the system image viewer on click. Terminals
+			// without support ignore the sequence and show the path as plain text.
+			const styled = theme.fg("accent", details.path);
+			let output = getCapabilities().hyperlinks
+				? hyperlink(styled, pathToFileURL(details.path).href)
+				: styled;
+			if (!getCapabilities().images || !context.showImages) {
+				output += ` ${theme.fg("muted", `[image/png ${details.width}×${details.height}]`)}`;
+			}
+			text.setText(output);
+			return text;
+		},
 
 		async execute(_toolCallId, params, signal, onUpdate) {
 			const baseUrl = requireBaseUrl();
