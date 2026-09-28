@@ -9,7 +9,7 @@
   },
   "retry": {
     "enabled": true,
-    "maxRetries": 10000,
+    "maxRetries": 48,
     "baseDelayMs": 5000,
     "maxAgentDelayMs": 1800000
   },
