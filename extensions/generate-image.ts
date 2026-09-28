@@ -120,11 +120,13 @@ function resolveOutputDir(): string {
 		mkdirSync(dir, { recursive: true });
 		return dir;
 	}
-	// UID-scoped and 0700: /tmp is world-writable, so a fixed path could be
-	// pre-created or symlinked by another local user.
+	// UID-scoped so a fixed name cannot be squatted, but world-readable so a
+	// terminal running as another user can follow the file:// links. chmod is explicit
+	// because the process umask (0007 here) strips the mode passed to mkdir, and it
+	// also fails if another user already owns the directory, which is the point.
 	const dir = join(tmpdir(), `pi-comfyui-${process.getuid?.() ?? "user"}`);
-	mkdirSync(dir, { recursive: true, mode: 0o700 });
-	chmodSync(dir, 0o700);
+	mkdirSync(dir, { recursive: true, mode: 0o755 });
+	chmodSync(dir, 0o755);
 	return dir;
 }
 
@@ -400,7 +402,8 @@ export default function (pi: ExtensionAPI) {
 			const data = Buffer.from(await imageResponse.arrayBuffer());
 
 			const path = join(outputDir, basename(image.filename));
-			writeFileSync(path, data);
+			writeFileSync(path, data, { mode: 0o644 });
+			chmodSync(path, 0o644);
 
 			return {
 				content: [
