@@ -102,17 +102,30 @@ cd ~/.pi/agent && git pull
 
 ## Environment variable resolution
 
-Pi starts with the current shell environment as a base. The `_env-injector` extension (`extensions/_env-injector.ts`) layers additional sources on top before any other extension runs, in this priority order (later overrides earlier):
+Pi starts with the current shell environment, which is the **highest** priority and is never overwritten. The `_env-injector` extension (`extensions/_env-injector.ts`) then adds variables that the shell does not already define, layering file-based sources in this priority order (later overrides earlier):
 
 | Priority | Source | Description |
 |---|---|---|
-| 1 (base) | Shell / OS environment | Actual shell env vars, `.profile`, systemd, etc. |
-| 2 | `~/.pi/agent/settings.json` → `"env"` block | Global Pi settings, supports `$VAR` / `${VAR}` expansion |
-| 3 | `~/.pi/agent/.env` | Global dotenv (checked into version control) |
-| 4 | `~/.pi/agent/.env.local` | Global dotenv secrets (gitignored) |
-| 5 | `.pi/settings.json` → `"env"` block | Per-project Pi settings, supports `$VAR` / `${VAR}` expansion |
-| 6 | `$cwd/.env` | Project-level defaults |
-| 7 (highest) | `$cwd/.env.local` | Project-level local overrides |
+| — (highest) | Shell / OS environment | Actual shell env vars, `.profile`, systemd, etc. Always wins; file sources can only add variables the shell does not define. |
+| 1 (lowest) | `~/.pi/agent/settings.json` → `"env"` block | Global Pi settings, supports `$VAR` / `${VAR}` expansion |
+| 2 | `~/.pi/agent/.env` | Global dotenv (checked into version control) |
+| 3 | `~/.pi/agent/.env.local` | Global dotenv secrets (gitignored) |
+| 4 | `.pi/settings.json` → `"env"` block | Per-project Pi settings, supports `$VAR` / `${VAR}` expansion |
+| 5 | `$cwd/.env` | Project-level defaults |
+| 6 (file sources) | `$cwd/.env.local` | Project-level local overrides |
+
+Tiers 4–6 apply only to trusted projects. A file tier that redefines a shell variable has no effect, and later tiers referencing that name expand to the shell value.
+
+Project trust is resolved the way Pi resolves it, except that `.env`/`.env.local` count as trust-requiring even though Pi does not list them:
+
+1. `--approve` / `-a` trusts, `--no-approve` / `-na` declines (last flag wins, parsing stops at `--`).
+2. The nearest saved decision in `~/.pi/agent/trust.json` wins — Pi walks up parent folders, so trusting a parent trusts its subdirectories.
+3. `defaultProjectTrust`: `"always"` trusts, `"never"` declines, `"ask"` (or unset) cannot be answered before extensions load.
+4. `"ask"` defers to a `session_start` handler that applies tiers 4–6 if `ctx.isProjectTrusted()` — this covers an interactive *Trust* answer, including *this session only*, and projects whose only trust-requiring resource is their env files (which Pi auto-trusts).
+
+So a repo Pi gates on cannot inject or override `LITELLM_API_KEY` via its `.env.local`, while `--no-approve` or a saved `false` also suppresses project tiers for a project you normally trust. A repo whose only trust-requiring resource is its env files is still auto-trusted by Pi, so its env files apply at `session_start` unless you decline with `-na` or a saved `false`.
+
+Values the injector wrote itself are recorded by hash in `__PI_ENV_INJECTOR_KEYS`, so they are not mistaken for shell variables on a later run in the same process. Editing an env file and running `/reload` — or switching sessions — re-reads it, as does a nested `pi` started from a pty shell. Only a value that differs from the recorded hash is left untouched: a genuine export, including `FOO=bar pi` in a nested shell. Only hashes are stored, never values.
 
 ## Extensions & Customizations
 
@@ -190,7 +203,7 @@ Pi starts with the current shell environment as a base. The `_env-injector` exte
 
 | Extension | Description |
 |---|---|
-| **`_env-injector.ts`** | Loads environment variables from settings.json env blocks and `.env`/`.env.local` files (both global and project-level) before any other extension runs. 7-tier priority: shell env → global settings → global .env → global .env.local → project settings → project .env → project .env.local. Supports `$VAR`, `${VAR}`, and `$$` shell-style expansion within values. |
+| **`_env-injector.ts`** | Loads environment variables from settings.json env blocks and `.env`/`.env.local` files (both global and project-level) before any other extension runs. Shell env vars always win (file sources only add what the shell does not define); file tiers then cascade global settings → global .env → global .env.local → project settings → project .env → project .env.local. Project tiers honor Pi's trust decision (`--approve`/`--no-approve`, nearest `trust.json` entry, `defaultProjectTrust`, else an interactive answer via a `session_start` fallback), with `.env`/`.env.local` counted as trust-requiring. Its own values stay overridable on `/reload`, session switch, and in nested pi processes (tracked by value hash in `__PI_ENV_INJECTOR_KEYS`). Supports `$VAR`, `${VAR}`, and `$$` shell-style expansion within values. |
 | **`_install-deps.ts`** | Scans sibling extension directories for `package.json` files and auto-runs `npm install` if `node_modules` is missing or incomplete. Runs before other extensions, ensuring deps like `zigpty` and `@xterm/headless` (used by the PTY extension) are ready. |
 
 ### 🐛 Debugging & Diagnostics
@@ -245,7 +258,7 @@ Configured in `modes.json` — all use **DeepSeek V4 Flash** via LiteLLM with di
 ├── .env.local            # Local secrets (gitignored)
 ├── npm/                  # Pi packages (package.json + node_modules)
 ├── extensions/                    # Custom TS/JS extensions
-│   ├── _env-injector.ts           # Dotenv/settings env injection (7 tiers)
+│   ├── _env-injector.ts           # Dotenv/settings env injection (shell env wins)
 │   ├── _install-deps.ts           # Auto npm install for sibling extensions
 │   ├── context-dump.ts            # /context-dump command for debugging
 │   ├── fusion.ts                  # Multi-model deliberation panel + judge
