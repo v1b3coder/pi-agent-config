@@ -16,22 +16,40 @@
  *
  * Priority (later in the list overrides earlier — i.e. more specific wins):
  *
- *    (lowest)  1.  Actual shell / .profile env vars
- *             2.  ~/.pi/agent/settings.json  "env"   (global Pi settings)
- *             3.  ~/.pi/agent/.env                   (global dotenv)
- *             4.  ~/.pi/agent/.env.local             (global dotenv local)
- *             5.  .pi/settings.json          "env"   (per-project Pi settings)
- *             6.  $cwd/.env                          (project defaults)
- *    (highest) 7.  $cwd/.env.local                    (local overrides)
+ *    (lowest)  1.  ~/.pi/agent/settings.json  "env"   (global Pi settings)
+ *              2.  ~/.pi/agent/.env                   (global dotenv)
+ *              3.  ~/.pi/agent/.env.local             (global dotenv local)
+ *              4.  .pi/settings.json          "env"   (per-project Pi settings)
+ *              5.  $cwd/.env                          (project defaults)
+ *    (highest) 6.  $cwd/.env.local                    (local overrides)
  *
- *    Tiers 5–7 apply only when the project is trusted (trust.json decision,
- *    else defaultProjectTrust === "always"); see isProjectTrusted().
+ *    Above all of these sits the real shell / .profile environment: variables
+ *    already exported when pi starts are never overwritten by any file-based
+ *    source (those can still add variables the shell does not define), so
+ *    `FOO=bar pi` always beats `FOO=baz` in .env.local. A file tier that
+ *    redefines a shell variable therefore has no effect, and later tiers that
+ *    reference it expand to the shell value.
+ *
+ *    Values this extension wrote itself do not count as shell variables on a later
+ *    run in the same process (`/reload`, `ctx.reload()`, session switch) or in a
+ *    nested pi started from a pty shell — they are recognized via
+ *    INJECTED_KEYS_ENV and stay overridable, so editing an env file and
+ *    reloading still works.
+ *
+ *    Tiers 4–6 apply only when the project is trusted. Trust is resolved the
+ *    way pi resolves it: the --approve/--no-approve CLI override, then
+ *    trust-requiring project resources (including .env/.env.local, which pi does
+ *    not count itself), then the nearest saved trust.json entry, then
+ *    defaultProjectTrust; see resolveProjectTrust(). "ask" cannot be answered
+ *    before extensions load, so a project trusted only by an interactive answer
+ *    is picked up by the session_start fallback in the factory.
  *
  * Within each source, keys are applied in iteration / line order.
  */
 
+import { createHash } from "node:crypto";
 import { readFileSync, existsSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { hasTrustRequiringProjectResources, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 // ─── Variable expansion ──────────────────────────────────────────────────────
@@ -185,69 +203,199 @@ function loadDotenvFile(filePath: string): Record<string, string> {
 
 // ─── Project trust ──────────────────────────────────────────────────────────
 
+/** CLI flags pi uses to force the decision; parsing stops at "--", like pi's. */
+function readTrustOverride(): boolean | undefined {
+  let override: boolean | undefined;
+  for (const arg of process.argv.slice(2)) {
+    if (arg === "--") break;
+    if (arg === "--approve" || arg === "-a") override = true;
+    else if (arg === "--no-approve" || arg === "-na") override = false;
+  }
+  return override;
+}
+
 /**
- * Mirrors pi's resolveProjectTrusted() saved-decision path: a saved yes/no in
- * trust.json wins, otherwise defaultProjectTrust ("always" trusts, everything
- * else declines). Never prompts. Project tiers are only injected for trusted
- * projects, so an untrusted repo cannot override e.g. LITELLM_API_KEY via its
- * .env.local.
+ * Project env files are not on pi's list of trust-requiring resources, so add
+ * them here: a project that can change our env vars should need a trust decision
+ * even when it ships nothing else that pi gates on.
  */
-function isProjectTrusted(cwd: string, home: string): boolean {
-  // Mirrors pi's resolveProjectTrusted(): projects without trust-requiring
-  // resources are implicitly trusted; otherwise a saved trust.json decision
-  // wins, falling back to defaultProjectTrust ("always" trusts). Never
-  // prompts. Reading the files is the only option here — the factory runs
-  // before project trust is resolved.
-  if (!hasTrustRequiringProjectResources(cwd)) return true;
+function hasProjectEnvFiles(cwd: string): boolean {
+  return existsSync(join(cwd, ".env")) || existsSync(join(cwd, ".env.local"));
+}
+
+/**
+ * Mirrors pi's resolveProjectTrusted() from outside the runtime: a project
+ * without trust-requiring resources is trusted, otherwise the --approve/
+ * --no-approve override wins, then the nearest saved trust.json entry (pi walks
+ * up parent folders), then defaultProjectTrust ("always" trusts; "never" and "ask"
+ * decline). Never prompts, so a project pi gates on cannot inject or override
+ * e.g. LITELLM_API_KEY via its .env.local.
+ */
+function resolveProjectTrust(cwd: string, home: string): boolean {
+  if (!hasTrustRequiringProjectResources(cwd) && !hasProjectEnvFiles(cwd)) return true;
+  const override = readTrustOverride();
+  if (override !== undefined) return override;
+  const saved = readTrustStoreEntry(cwd, home);
+  if (saved !== null) return saved;
+  return readDefaultProjectTrust(home) === "always";
+}
+
+/** Nearest saved decision, walking up like pi's findNearestTrustEntry(). */
+function readTrustStoreEntry(cwd: string, home: string): boolean | null {
   try {
-    const trustData = JSON.parse(readFileSync(join(home, ".pi", "agent", "trust.json"), "utf-8")) as Record<string, boolean>;
-    if (typeof trustData[cwd] === "boolean") return trustData[cwd];
+    const data = JSON.parse(
+      readFileSync(join(home, ".pi", "agent", "trust.json"), "utf-8"),
+    ) as Record<string, unknown>;
+    let dir = cwd;
+    while (true) {
+      const decision = data[dir];
+      if (decision === true || decision === false) return decision;
+      const parent = dirname(dir);
+      if (parent === dir) return null;
+      dir = parent;
+    }
   } catch {
-    // no trust.json or unreadable — fall through to default
+    return null;
   }
+}
+
+/** Global defaultProjectTrust, normalized like pi's getDefaultProjectTrust(). */
+function readDefaultProjectTrust(home: string): "always" | "never" | "ask" {
   try {
-    const data = JSON.parse(readFileSync(join(home, ".pi", "agent", "settings.json"), "utf-8")) as { defaultProjectTrust?: string };
-    return data?.defaultProjectTrust === "always";
+    const data = JSON.parse(
+      readFileSync(join(home, ".pi", "agent", "settings.json"), "utf-8"),
+    ) as { defaultProjectTrust?: string };
+    const value = data?.defaultProjectTrust;
+    return value === "always" || value === "never" ? value : "ask";
   } catch {
-    return false;
+    return "ask";
   }
+}
+
+// ─── Injection marker ──────────────────────────────────────────────────────
+
+/**
+ * Env var holding a JSON object of {KEY: sha256(value)[0..16]} for every variable
+ * this extension has written itself.
+ *
+ * The factory can run more than once inside a single process: `/reload`,
+ * `ctx.reload()`, session switches (new/resume/fork), and nested pi processes
+ * started from a pty shell all inherit our own output in process.env. Without the
+ * marker those values would look like real shell variables and could never be
+ * updated. A key therefore counts as "from the shell" only while its current value
+ * differs from the recorded hash — our own values stay overridable, while a value
+ * the user re-exported in a nested shell keeps winning. Only hashes are stored, so
+ * no secret values are duplicated into child environments.
+ */
+const INJECTED_KEYS_ENV = "__PI_ENV_INJECTOR_KEYS";
+
+function readInjectedKeys(): Map<string, string> {
+  try {
+    const parsed: unknown = JSON.parse(process.env[INJECTED_KEYS_ENV] ?? "{}");
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return new Map();
+    return new Map(
+      Object.entries(parsed as Record<string, unknown>).filter(
+        (entry): entry is [string, string] => typeof entry[1] === "string",
+      ),
+    );
+  } catch {
+    return new Map();
+  }
+}
+
+function hashValue(value: string): string {
+  return createHash("sha256").update(value).digest("hex").slice(0, 16);
 }
 
 // ─── Extension factory ──────────────────────────────────────────────────────
 
-export default function (_pi: ExtensionAPI): void {
+export default function (pi: ExtensionAPI): void {
   const home = process.env.HOME || process.env.USERPROFILE || "";
   const cwd = process.cwd();
 
-  // Project tiers are only honored for trusted projects (see project_trust gate).
-  const projectTrusted = isProjectTrusted(cwd, home);
+  // Variables present before any file is read come from the real shell (or from
+  // pi itself) and are the highest priority: file-based sources may add new
+  // variables but never overwrite these. The one exception is a key still holding
+  // the exact value this extension wrote earlier (see INJECTED_KEYS_ENV) — that is
+  // our own output being seen again after /reload, a session switch, or in a nested
+  // pi process, so it stays overridable. Windows env lookups are case-insensitive.
+  const caseInsensitive = process.platform === "win32";
+  const norm = (key: string): string => (caseInsensitive ? key.toUpperCase() : key);
+  // Starts as what we wrote on an earlier run in this process (or in a parent
+  // pi), and grows as the merge loop below writes more. A key is ours while it
+  // still holds the value recorded here, so a later tier can override an earlier
+  // one while a genuinely exported value stays protected.
+  const injected = new Map(
+    [...readInjectedKeys()].map(([key, hash]) => [norm(key), hash]),
+  );
+  const isShellVar = (key: string): boolean => {
+    const current = process.env[key];
+    if (current === undefined) return false;
+    return injected.get(norm(key)) !== hashValue(current);
+  };
 
-  // Sources in priority order: later overrides earlier.
-  // Actual shell env vars are the base (tier 1).
-  const sources: Array<{ label: string; vars: Record<string, string> }> = [
-    // Tier 2: global Pi settings
+  // Project tiers are only honored for trusted projects (see resolveProjectTrust).
+  const projectTrusted = resolveProjectTrust(cwd, home);
+
+  // File sources in priority order: later overrides earlier. Shell env sits
+  // above all of them and wins by being skipped, not by being re-applied.
+  type EnvSource = { label: string; vars: Record<string, string> };
+  const globalSources: EnvSource[] = [
+    // Tier 1: global Pi settings
     { label: "~/.pi/agent/settings.json", vars: loadSettingsEnv(join(home, ".pi", "agent", "settings.json")) },
-    // Tier 3: global dotenv (overrides settings.json)
+    // Tier 2: global dotenv (overrides settings.json)
     { label: "~/.pi/agent/.env",          vars: loadDotenvFile(join(home, ".pi", "agent", ".env")) },
-    // Tier 4: global dotenv local overrides
+    // Tier 3: global dotenv local overrides
     { label: "~/.pi/agent/.env.local",    vars: loadDotenvFile(join(home, ".pi", "agent", ".env.local")) },
-    // Tiers 5–7: per-project sources — gated on project trust
-    ...(projectTrusted
-      ? [
-          // Tier 5: per-project Pi settings
-          { label: ".pi/settings.json", vars: loadSettingsEnv(join(cwd, ".pi", "settings.json")) },
-          // Tier 6: project defaults
-          { label: ".env",              vars: loadDotenvFile(join(cwd, ".env")) },
-          // Tier 7: local overrides (highest)
-          { label: ".env.local",        vars: loadDotenvFile(join(cwd, ".env.local")) },
-        ]
-      : []),
+  ];
+  const projectSources: EnvSource[] = [
+    // Tier 4: per-project Pi settings
+    { label: ".pi/settings.json", vars: loadSettingsEnv(join(cwd, ".pi", "settings.json")) },
+    // Tier 5: project defaults
+    { label: ".env",              vars: loadDotenvFile(join(cwd, ".env")) },
+    // Tier 6: local overrides (highest file tier)
+    { label: ".env.local",        vars: loadDotenvFile(join(cwd, ".env.local")) },
   ];
 
-  // Apply sources in priority order.
-  for (const source of sources) {
-    for (const [key, value] of Object.entries(source.vars)) {
-      process.env[key] = expandVars(value);
+  // Apply file sources in priority order, skipping anything the shell already
+  // set. Expansion reads the live process.env, so a skipped key resolves to the
+  // shell value in later tiers rather than to a value that never took effect.
+  const applySources = (sources: EnvSource[]): void => {
+    for (const source of sources) {
+      for (const [key, value] of Object.entries(source.vars)) {
+        if (isShellVar(key)) continue;
+        const expanded = expandVars(value);
+        process.env[key] = expanded;
+        injected.set(norm(key), hashValue(expanded));
+      }
     }
+  };
+
+  // Record what we wrote so the next run in this process (or a nested pi) can
+  // tell our output apart from a real shell variable. Keys we wrote before but no
+  // longer define stay listed, so a stale value remains overridable if it returns.
+  const flushMarker = (): void => {
+    if (injected.size > 0) {
+      process.env[INJECTED_KEYS_ENV] = JSON.stringify(Object.fromEntries(injected));
+    }
+  };
+
+  applySources(globalSources);
+  flushMarker();
+
+  if (projectTrusted) {
+    applySources(projectSources);
+    flushMarker();
+  } else {
+    // A project trusted only by an interactive answer is not recognizable yet: pi
+    // loads extensions once to ask (with project trust forced off), then reloads
+    // them with the decision. A remembered answer is already in trust.json by that
+    // second pass, so the factory above sees it; a session-only answer is not, so
+    // re-check before the first turn runs.
+    pi.on("session_start", (_event, ctx) => {
+      if (!ctx.isProjectTrusted()) return;
+      applySources(projectSources);
+      flushMarker();
+    });
   }
 }
