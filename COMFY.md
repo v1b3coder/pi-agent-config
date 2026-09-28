@@ -165,14 +165,22 @@ Default:
 join(os.tmpdir(), `pi-comfyui-${process.getuid?.() ?? "user"}`)
 ```
 
-Created with mode `0700`.
+Created with mode `0755`; PNGs are written `0644`.
 
 Rationale:
 
 - `os.tmpdir()` respects `TMPDIR`, so it is itself environment-configurable.
 - **UID-scoped, not a fixed name.** `/tmp` is mode `1777` (world-writable). A fixed
   path like `/tmp/pi-comfyui-images` lets another local user pre-create it, own it, or
-  symlink it before we write. Scoping by UID plus `0700` closes that.
+  symlink it before we write.
+- **World-readable, not `0700`.** The terminal that follows the `file://` links in tool
+  results can run as a different system user than Pi, and a private directory would make
+  every link fail on click. UID scoping alone does not prevent a squatted directory, since
+  the name is still guessable; the explicit `chmod` does, because it fails with `EPERM`
+  when another user owns the directory, so the tool stops instead of writing into a
+  directory it does not control. The `chmod` is also what actually applies the modes: the
+  process umask here is `0007`, which strips world bits from any mode passed to `mkdir`
+  or `writeFileSync`. The cost is that any local account can read generated images.
 - On this host `/tmp` is **not tmpfs** — it is on the root filesystem, and
   systemd-tmpfiles (`/usr/lib/tmpfiles.d/tmp.conf`) cleans entries older than
   **30 days**. So the default is "scratch that survives reboots for weeks," not
