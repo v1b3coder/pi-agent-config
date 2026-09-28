@@ -9,8 +9,8 @@
  *     replaces EmptyLatentImage. KSampler.denoise stays 1.0 — lowering it is the
  *     Stable-Diffusion img2img reflex and is wrong for this model.
  *
- * Canonical edit graph, kept in sync with this file:
- *   extensions/fixtures/qwen-image-2.1-image-edit.api.json
+ * The canonical edit graph, exported from ComfyUI in API format, is kept as a block
+ * comment above buildEditGraph() so the code and the reference stay comparable.
  *
  * Each call builds the graph, submits it, polls /history, fetches the PNG via /view,
  * writes it to disk, and returns it inline. Calls are serialized so a shared GPU is
@@ -52,7 +52,7 @@ const EDIT_RESOLUTION_MAX = 2048;
 const EDIT_RESOLUTION_SNAP = 32;
 const EDIT_CACHE_DTYPE = "int8";
 const EDIT_CFG = 1;
-// Node ids mirror the canonical fixture so the two stay comparable.
+// Node ids mirror the canonical graph in the block comment above buildEditGraph.
 const EDIT_UNET_NODE = "451";
 const EDIT_CLIP_NODE = "453";
 const EDIT_VAE_NODE = "454";
@@ -292,6 +292,96 @@ function buildGraph(options: {
 	};
 }
 
+/*
+ * Canonical Qwen-Image 2.1 image-edit graph, exported from the ComfyUI UI in API
+ * format. Reference only: nothing reads this at runtime — buildEditGraph() below
+ * builds the graph that is actually submitted. Kept so the node ids, wiring, and
+ * sampler settings in code can be diffed against a known-working export.
+ *
+{
+  "451": {
+    "class_type": "UNETLoader",
+    "inputs": {
+      "unet_name": "qwen_image_2.1_int8_convrot.safetensors",
+      "weight_dtype": "default"
+    }
+  },
+  "453": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+      "clip_name": "qwen3vl_8b_int8_convrot.safetensors",
+      "type": "qwen_image"
+    }
+  },
+  "454": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "qwen_image_2.1_vae_bf16.safetensors"
+    }
+  },
+  "469": {
+    "class_type": "QwenImage21Cache",
+    "inputs": {
+      "model": ["451", 0],
+      "device": "auto",
+      "dtype": "int8"
+    }
+  },
+  "10": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "image_1.png"
+    }
+  },
+  "11": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "image_2.png"
+    }
+  },
+  "474": {
+    "class_type": "TextEncodeQwenImage21",
+    "inputs": {
+      "clip": ["453", 0],
+      "vae": ["454", 0],
+      "prompt": "put the shirt from <image2> on <image1>, keep pose",
+      "negative_prompt": "",
+      "resolution": 1024,
+      "images.image_1": ["10", 0],
+      "images.image_2": ["11", 0]
+    }
+  },
+  "458": {
+    "class_type": "KSampler",
+    "inputs": {
+      "model": ["469", 0],
+      "positive": ["474", 0],
+      "negative": ["474", 1],
+      "latent_image": ["474", 2],
+      "seed": 0,
+      "steps": 25,
+      "cfg": 1,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1.0
+    }
+  },
+  "457": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": ["458", 0],
+      "vae": ["454", 0]
+    }
+  },
+  "9": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": ["457", 0],
+      "filename_prefix": "pi_edit"
+    }
+  }
+}
+ */
 function buildEditGraph(options: {
 	prompt: string;
 	resolution: number;
