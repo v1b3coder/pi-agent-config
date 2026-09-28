@@ -1,8 +1,20 @@
 /**
- * generate_image — text-to-image on a local ComfyUI instance (Qwen-Image 2.1).
+ * generate_image — text-to-image and image editing on a local ComfyUI instance (Qwen-Image 2.1).
  *
- * One tool, one code path: build the proven 9-node graph, submit, poll /history,
- * fetch the PNG via /view, write it to disk, and return it inline.
+ * Two code paths, one tool:
+ *   - no reference_images: the proven 9-node text-to-image graph.
+ *   - reference_images:   the Qwen-Image 2.1 image-edit graph. The entry point is
+ *     TextEncodeQwenImage21, not VAEEncode: the reference images are spliced into
+ *     the text encoder, and its `latent` output (an empty latent at image_1's size)
+ *     replaces EmptyLatentImage. KSampler.denoise stays 1.0 — lowering it is the
+ *     Stable-Diffusion img2img reflex and is wrong for this model.
+ *
+ * Canonical edit graph, kept in sync with this file:
+ *   extensions/fixtures/qwen-image-2.1-image-edit.api.json
+ *
+ * Each call builds the graph, submits it, polls /history, fetches the PNG via /view,
+ * writes it to disk, and returns it inline. Calls are serialized so a shared GPU is
+ * not hit by parallel renders.
  *
  * Configuration comes from the environment, read at call time:
  *   COMFYUI_URL               required endpoint, e.g. http://host:8188
@@ -16,9 +28,9 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getCapabilities, hyperlink, Text } from "@earendil-works/pi-tui";
 import { randomInt, randomUUID } from "node:crypto";
-import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join, resolve } from "node:path";
+import { basename, extname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { Type } from "typebox";
 
@@ -30,9 +42,25 @@ const DEFAULT_STEPS = 30;
 const DEFAULT_TIMEOUT_SECONDS = 300;
 const POLL_INTERVAL_MS = 2_000;
 const REQUEST_TIMEOUT_MS = 15_000;
+const UPLOAD_TIMEOUT_MS = 60_000;
 const DIMENSION_MIN = 16;
 const DIMENSION_MAX = 16_384;
 const DIMENSION_SNAP = 8;
+const MAX_REFERENCES = 16;
+const EDIT_RESOLUTION_DEFAULT = 1024;
+const EDIT_RESOLUTION_MAX = 2048;
+const EDIT_RESOLUTION_SNAP = 32;
+const EDIT_CACHE_DTYPE = "int8";
+const EDIT_CFG = 1;
+// Node ids mirror the canonical fixture so the two stay comparable.
+const EDIT_UNET_NODE = "451";
+const EDIT_CLIP_NODE = "453";
+const EDIT_VAE_NODE = "454";
+const EDIT_CACHE_NODE = "469";
+const EDIT_ENCODE_NODE = "474";
+const EDIT_SAMPLER_NODE = "458";
+const EDIT_DECODE_NODE = "457";
+const EDIT_LOAD_IMAGE_BASE = 10;
 
 interface GenerateImageDetails {
 	path: string;
@@ -51,6 +79,11 @@ interface HistoryImage {
 interface HistoryEntry {
 	status?: { status_str?: string; completed?: boolean; messages?: unknown[] };
 	outputs?: Record<string, { images?: HistoryImage[] } | undefined>;
+}
+
+interface UploadedImage {
+	name?: string;
+	subfolder?: string;
 }
 
 function abortError(): Error {
@@ -152,6 +185,51 @@ async function resolveModel(baseUrl: string, category: string, envVar: string): 
 	);
 }
 
+// Renders are serialized: the ComfyUI GPU is shared with other services, and two
+// concurrent graphs would exhaust VRAM.
+let renderQueue: Promise<unknown> = Promise.resolve();
+function runExclusive<T>(fn: () => Promise<T>): Promise<T> {
+	const run = renderQueue.then(fn, fn);
+	renderQueue = run.then(
+		() => undefined,
+		() => undefined,
+	);
+	return run;
+}
+
+function pngSize(data: Buffer): { width: number; height: number } | undefined {
+	if (data.length < 24 || data.readUInt32BE(0) !== 0x89504e47) return undefined;
+	return { width: data.readUInt32BE(16), height: data.readUInt32BE(20) };
+}
+
+async function uploadReference(baseUrl: string, path: string, signal: AbortSignal | undefined): Promise<string> {
+	let data: Buffer;
+	try {
+		data = readFileSync(path);
+	} catch (error) {
+		throw new Error(
+			`Could not read reference image ${path}: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
+
+	const form = new FormData();
+	form.append("image", new Blob([new Uint8Array(data)]), `pi_ref_${randomUUID()}${extname(path) || ".png"}`);
+	form.append("type", "input");
+
+	const response = await comfyFetch(`${baseUrl}/upload/image`, {
+		method: "POST",
+		body: form,
+		signal: withTimeout(signal, UPLOAD_TIMEOUT_MS),
+	});
+	const body = (await response.json().catch(() => undefined)) as UploadedImage | undefined;
+	if (!response.ok || !body?.name) {
+		throw new Error(
+			`ComfyUI rejected reference image ${path} (HTTP ${response.status}): ${JSON.stringify(body)}`,
+		);
+	}
+	return body.subfolder ? `${body.subfolder}/${body.name}` : body.name;
+}
+
 function buildGraph(options: {
 	prompt: string;
 	width: number;
@@ -214,6 +292,79 @@ function buildGraph(options: {
 	};
 }
 
+function buildEditGraph(options: {
+	prompt: string;
+	resolution: number;
+	steps: number;
+	seed: number;
+	unetName: string;
+	clipName: string;
+	vaeName: string;
+	imageNames: string[];
+	filenamePrefix: string;
+}) {
+	const graph: Record<string, { class_type: string; inputs: Record<string, unknown> }> = {
+		[EDIT_UNET_NODE]: {
+			class_type: "UNETLoader",
+			inputs: { unet_name: options.unetName, weight_dtype: "default" },
+		},
+		[EDIT_CLIP_NODE]: {
+			class_type: "CLIPLoader",
+			inputs: { clip_name: options.clipName, type: CLIP_TYPE },
+		},
+		[EDIT_VAE_NODE]: {
+			class_type: "VAELoader",
+			inputs: { vae_name: options.vaeName },
+		},
+		[EDIT_CACHE_NODE]: {
+			class_type: "QwenImage21Cache",
+			inputs: { model: [EDIT_UNET_NODE, 0], device: "auto", dtype: EDIT_CACHE_DTYPE },
+		},
+		[EDIT_ENCODE_NODE]: {
+			class_type: "TextEncodeQwenImage21",
+			inputs: {
+				clip: [EDIT_CLIP_NODE, 0],
+				vae: [EDIT_VAE_NODE, 0],
+				prompt: options.prompt,
+				negative_prompt: "",
+				resolution: options.resolution,
+			},
+		},
+		[EDIT_SAMPLER_NODE]: {
+			class_type: "KSampler",
+			inputs: {
+				model: [EDIT_CACHE_NODE, 0],
+				positive: [EDIT_ENCODE_NODE, 0],
+				negative: [EDIT_ENCODE_NODE, 1],
+				latent_image: [EDIT_ENCODE_NODE, 2],
+				seed: options.seed,
+				steps: options.steps,
+				cfg: EDIT_CFG,
+				sampler_name: "euler",
+				scheduler: "simple",
+				denoise: 1.0,
+			},
+		},
+		[EDIT_DECODE_NODE]: {
+			class_type: "VAEDecode",
+			inputs: { samples: [EDIT_SAMPLER_NODE, 0], vae: [EDIT_VAE_NODE, 0] },
+		},
+		[SAVE_NODE_ID]: {
+			class_type: "SaveImage",
+			inputs: { images: [EDIT_DECODE_NODE, 0], filename_prefix: options.filenamePrefix },
+		},
+	};
+
+	options.imageNames.forEach((image, index) => {
+		const nodeId = String(EDIT_LOAD_IMAGE_BASE + index);
+		graph[nodeId] = { class_type: "LoadImage", inputs: { image } };
+		// Autogrow inputs flatten to "images.image_N" in API format.
+		graph[EDIT_ENCODE_NODE]!.inputs[`images.image_${index + 1}`] = [nodeId, 0];
+	});
+
+	return graph;
+}
+
 function executionError(promptId: string, entry: HistoryEntry): Error {
 	const messages = Array.isArray(entry.status?.messages) ? entry.status.messages : [];
 	const details = messages
@@ -236,26 +387,49 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({		name: "generate_image",
 		label: "Generate Image",
 		description:
-			"Generate an image from a text prompt on the local ComfyUI instance and return it inline. " +
-			"Defaults to 1024x1024 at 30 steps. " +
+			"Generate an image from a text prompt, or edit images, on the local ComfyUI instance (Qwen-Image 2.1) and return the result inline. " +
+			"Text-to-image defaults to 1024x1024 at 30 steps. " +
+			"Pass reference_images (local file paths) to switch to image editing: image_1 is the edit target and sets the output size, image_2..image_16 are references, and the prompt refers to them as <image1>, <image2>, ... " +
+			"Image editing has no denoise knob (it stays 1.0) and ignores width/height; resolution is a pixel budget for resizing the references (0 = native size). " +
 			"Low step counts fail silently: ComfyUI reports success and writes a PNG, but the image is washed out and under-resolved, so keep steps at 30 or higher. " +
 			"Images below roughly 1 MP are also washed out even at 30 steps. " +
 			"By default PNGs are written to UID-scoped scratch space under tmp, not asset storage; copy a keeper into the project or set COMFYUI_OUTPUT_DIR to generate into it.",
-		promptSnippet: "Generate an image from a text prompt via the local ComfyUI instance.",
+		promptSnippet: "Generate an image from a text prompt, or edit images from local reference files, via the local ComfyUI instance.",
 		promptGuidelines: [
 			"generate_image defaults to 30 steps; lower values silently produce washed-out images.",
 			"generate_image writes to tmp scratch space by default; copy keepers into the project or set COMFYUI_OUTPUT_DIR.",
+			"To edit images, pass reference_images (local file paths): image_1 is the edit target and sets the output size, image_2..image_16 are references. In the prompt, refer to them as <image1>, <image2>, ...",
+			"Do not pass width/height with reference_images, and do not try to lower denoise: Qwen-Image 2.1 edit is not Stable Diffusion img2img and keeps denoise at 1.0.",
+			"Run one generate_image call at a time; the ComfyUI GPU is shared with other services.",
 		],
 		parameters: Type.Object({
-			prompt: Type.String({ description: "Text prompt describing the image to generate" }),
+			prompt: Type.String({
+				description:
+					"Text prompt. With reference_images, describe the edit and refer to the images as <image1>, <image2>, ...",
+			}),
+			reference_images: Type.Optional(
+				Type.Array(Type.String(), {
+					minItems: 1,
+					maxItems: MAX_REFERENCES,
+					description:
+						"Local file paths for image editing (Qwen-Image 2.1 edit). image_1 is the edit target and sets the output size; image_2..image_16 are references. Cannot be combined with width/height.",
+				}),
+			),
+			resolution: Type.Integer({
+				description:
+					"Image editing only: reference images are resized to about resolution x resolution pixels (multiple of 32, aspect ratio preserved); 0 keeps each reference at native size. Capped at 2048 for the shared GPU.",
+				minimum: 0,
+				maximum: EDIT_RESOLUTION_MAX,
+				default: EDIT_RESOLUTION_DEFAULT,
+			}),
 			width: Type.Integer({
-				description: "Image width in pixels, snapped to a multiple of 8",
+				description: "Text-to-image only: image width in pixels, snapped to a multiple of 8",
 				minimum: DIMENSION_MIN,
 				maximum: DIMENSION_MAX,
 				default: DEFAULT_WIDTH,
 			}),
 			height: Type.Integer({
-				description: "Image height in pixels, snapped to a multiple of 8",
+				description: "Text-to-image only: image height in pixels, snapped to a multiple of 8",
 				minimum: DIMENSION_MIN,
 				maximum: DIMENSION_MAX,
 				default: DEFAULT_HEIGHT,
@@ -301,117 +475,170 @@ export default function (pi: ExtensionAPI) {
 		},
 
 		async execute(_toolCallId, params, signal, onUpdate) {
-			const baseUrl = requireBaseUrl();
-			const outputDir = resolveOutputDir();
+			return runExclusive(async () => {
+				if (signal?.aborted) throw abortError();
 
-			const width = Math.round((params.width ?? DEFAULT_WIDTH) / DIMENSION_SNAP) * DIMENSION_SNAP;
-			const height = Math.round((params.height ?? DEFAULT_HEIGHT) / DIMENSION_SNAP) * DIMENSION_SNAP;
-			const steps = params.steps ?? envInt("COMFYUI_STEPS", DEFAULT_STEPS);
-			const seed = params.seed ?? randomInt(0, 2 ** 48 - 1);
-			const timeoutSeconds = envInt("COMFYUI_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS);
+				const baseUrl = requireBaseUrl();
+				const outputDir = resolveOutputDir();
 
-			const [unetName, clipName, vaeName] = await Promise.all([
-				resolveModel(baseUrl, "diffusion_models", "COMFYUI_DIFFUSION_MODEL"),
-				resolveModel(baseUrl, "text_encoders", "COMFYUI_CLIP_MODEL"),
-				resolveModel(baseUrl, "vae", "COMFYUI_VAE"),
-			]);
+				const referenceImages = params.reference_images ?? [];
+				const isEdit = referenceImages.length > 0;
 
-			const filenamePrefix = `pi_gen_${Date.now()}_${randomUUID().slice(0, 8)}`;
-			const graph = buildGraph({
-				prompt: params.prompt,
-				width,
-				height,
-				steps,
-				seed,
-				unetName,
-				clipName,
-				vaeName,
-				filenamePrefix,
-			});
+				// Correct the Stable-Diffusion img2img prior before doing any work.
+				if (isEdit && (params.width !== undefined || params.height !== undefined)) {
+					throw new Error(
+						"width/height are text-to-image only. With reference_images the output size follows image_1; remove width/height.",
+					);
+				}
+				if (!isEdit && params.resolution !== undefined) {
+					throw new Error("resolution only applies with reference_images; remove it for text-to-image.");
+				}
 
-			const submitResponse = await comfyFetch(`${baseUrl}/prompt`, {
-				method: "POST",
-				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({ prompt: graph, client_id: randomUUID() }),
-				signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-			});
-			const submitBody = (await submitResponse.json().catch(() => undefined)) as
-				| { prompt_id?: string; node_errors?: Record<string, unknown> }
-				| undefined;
-			if (!submitResponse.ok) {
-				throw new Error(
-					`ComfyUI rejected the prompt (HTTP ${submitResponse.status}): ${JSON.stringify(submitBody)}`,
-				);
-			}
-			if (submitBody?.node_errors && Object.keys(submitBody.node_errors).length > 0) {
-				throw new Error(`ComfyUI node errors: ${JSON.stringify(submitBody.node_errors)}`);
-			}
-			const promptId = submitBody?.prompt_id;
-			if (!promptId) {
-				throw new Error(`ComfyUI returned no prompt_id: ${JSON.stringify(submitBody)}`);
-			}
+				const steps = params.steps ?? envInt("COMFYUI_STEPS", DEFAULT_STEPS);
+				const seed = params.seed ?? randomInt(0, 2 ** 48 - 1);
+				const timeoutSeconds = envInt("COMFYUI_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS);
 
-			const startedAt = Date.now();
-			const deadline = startedAt + timeoutSeconds * 1000;
-			let image: HistoryImage | undefined;
+				const [unetName, clipName, vaeName] = await Promise.all([
+					resolveModel(baseUrl, "diffusion_models", "COMFYUI_DIFFUSION_MODEL"),
+					resolveModel(baseUrl, "text_encoders", "COMFYUI_CLIP_MODEL"),
+					resolveModel(baseUrl, "vae", "COMFYUI_VAE"),
+				]);
 
-			while (!image) {
-				const remainingMs = deadline - Date.now();
-				if (remainingMs <= 0) throw timeoutError(promptId, timeoutSeconds);
+				const filenamePrefix = `pi_gen_${Date.now()}_${randomUUID().slice(0, 8)}`;
+				let width = Math.round((params.width ?? DEFAULT_WIDTH) / DIMENSION_SNAP) * DIMENSION_SNAP;
+				let height = Math.round((params.height ?? DEFAULT_HEIGHT) / DIMENSION_SNAP) * DIMENSION_SNAP;
+				let graph: Record<string, { class_type: string; inputs: Record<string, unknown> }>;
 
-				let entry: HistoryEntry | undefined;
-				try {
-					const response = await comfyFetch(`${baseUrl}/history/${promptId}`, {
-						signal: withTimeout(signal, Math.min(REQUEST_TIMEOUT_MS, remainingMs)),
+				if (isEdit) {
+					const imageNames: string[] = [];
+					for (const path of referenceImages) {
+						imageNames.push(await uploadReference(baseUrl, path, signal));
+					}
+					const resolution = Math.min(
+						EDIT_RESOLUTION_MAX,
+						Math.round((params.resolution ?? EDIT_RESOLUTION_DEFAULT) / EDIT_RESOLUTION_SNAP) *
+							EDIT_RESOLUTION_SNAP,
+					);
+					graph = buildEditGraph({
+						prompt: params.prompt,
+						resolution,
+						steps,
+						seed,
+						unetName,
+						clipName,
+						vaeName,
+						imageNames,
+						filenamePrefix,
 					});
-					if (response.ok) {
-						entry = ((await response.json()) as Record<string, HistoryEntry>)[promptId];
-					}
-				} catch (error) {
-					if (signal?.aborted) throw abortError();
-					// Transient network or request timeout: retry until the deadline.
+					// The edit output follows image_1; its real size is read after download.
+					width = 0;
+					height = 0;
+				} else {
+					graph = buildGraph({
+						prompt: params.prompt,
+						width,
+						height,
+						steps,
+						seed,
+						unetName,
+						clipName,
+						vaeName,
+						filenamePrefix,
+					});
 				}
 
-				if (entry) {
-					if (entry.status?.status_str === "error") throw executionError(promptId, entry);
-					const images = entry.outputs?.[SAVE_NODE_ID]?.images;
-					if (images?.length) {
-						image = images[0];
-						break;
-					}
-					if (entry.status?.completed) {
-						throw new Error(`ComfyUI prompt ${promptId} finished without an image on node ${SAVE_NODE_ID}.`);
-					}
-				}
-
-				await sleep(POLL_INTERVAL_MS, signal);
-				onUpdate?.({
-					content: [{ type: "text", text: `Generating… ${Math.round((Date.now() - startedAt) / 1000)}s` }],
-					details: { path: "", width, height, steps, seed },
+				const submitResponse = await comfyFetch(`${baseUrl}/prompt`, {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({ prompt: graph, client_id: randomUUID() }),
+					signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
 				});
-			}
+				const submitBody = (await submitResponse.json().catch(() => undefined)) as
+					| { prompt_id?: string; node_errors?: Record<string, unknown> }
+					| undefined;
+				if (!submitResponse.ok) {
+					throw new Error(
+						`ComfyUI rejected the prompt (HTTP ${submitResponse.status}): ${JSON.stringify(submitBody)}`,
+					);
+				}
+				if (submitBody?.node_errors && Object.keys(submitBody.node_errors).length > 0) {
+					throw new Error(`ComfyUI node errors: ${JSON.stringify(submitBody.node_errors)}`);
+				}
+				const promptId = submitBody?.prompt_id;
+				if (!promptId) {
+					throw new Error(`ComfyUI returned no prompt_id: ${JSON.stringify(submitBody)}`);
+				}
 
-			const viewUrl = new URL(`${baseUrl}/view`);
-			viewUrl.searchParams.set("filename", image.filename);
-			viewUrl.searchParams.set("subfolder", image.subfolder ?? "");
-			viewUrl.searchParams.set("type", image.type ?? "output");
-			const imageResponse = await comfyFetch(viewUrl, { signal: withTimeout(signal, REQUEST_TIMEOUT_MS) });
-			if (!imageResponse.ok) {
-				throw new Error(`Failed to download generated image (HTTP ${imageResponse.status}).`);
-			}
-			const data = Buffer.from(await imageResponse.arrayBuffer());
+				const startedAt = Date.now();
+				const deadline = startedAt + timeoutSeconds * 1000;
+				let image: HistoryImage | undefined;
 
-			const path = join(outputDir, basename(image.filename));
-			writeFileSync(path, data, { mode: 0o644 });
-			chmodSync(path, 0o644);
+				while (!image) {
+					const remainingMs = deadline - Date.now();
+					if (remainingMs <= 0) throw timeoutError(promptId, timeoutSeconds);
 
-			return {
-				content: [
-					{ type: "text", text: path },
-					{ type: "image", data: data.toString("base64"), mimeType: "image/png" },
-				],
-				details: { path, width, height, steps, seed } satisfies GenerateImageDetails,
-			};
+					let entry: HistoryEntry | undefined;
+					try {
+						const response = await comfyFetch(`${baseUrl}/history/${promptId}`, {
+							signal: withTimeout(signal, Math.min(REQUEST_TIMEOUT_MS, remainingMs)),
+						});
+						if (response.ok) {
+							entry = ((await response.json()) as Record<string, HistoryEntry>)[promptId];
+						}
+					} catch (error) {
+						if (signal?.aborted) throw abortError();
+						// Transient network or request timeout: retry until the deadline.
+					}
+
+					if (entry) {
+						if (entry.status?.status_str === "error") throw executionError(promptId, entry);
+						const images = entry.outputs?.[SAVE_NODE_ID]?.images;
+						if (images?.length) {
+							image = images[0];
+							break;
+						}
+						if (entry.status?.completed) {
+							throw new Error(`ComfyUI prompt ${promptId} finished without an image on node ${SAVE_NODE_ID}.`);
+						}
+					}
+
+					await sleep(POLL_INTERVAL_MS, signal);
+					onUpdate?.({
+						content: [{ type: "text", text: `Generating… ${Math.round((Date.now() - startedAt) / 1000)}s` }],
+						details: { path: "", width, height, steps, seed },
+					});
+				}
+
+				const viewUrl = new URL(`${baseUrl}/view`);
+				viewUrl.searchParams.set("filename", image.filename);
+				viewUrl.searchParams.set("subfolder", image.subfolder ?? "");
+				viewUrl.searchParams.set("type", image.type ?? "output");
+				const imageResponse = await comfyFetch(viewUrl, { signal: withTimeout(signal, REQUEST_TIMEOUT_MS) });
+				if (!imageResponse.ok) {
+					throw new Error(`Failed to download generated image (HTTP ${imageResponse.status}).`);
+				}
+				const data = Buffer.from(await imageResponse.arrayBuffer());
+
+				const path = join(outputDir, basename(image.filename));
+				writeFileSync(path, data, { mode: 0o644 });
+				chmodSync(path, 0o644);
+
+				if (isEdit) {
+					const size = pngSize(data);
+					if (size) {
+						width = size.width;
+						height = size.height;
+					}
+				}
+
+				return {
+					content: [
+						{ type: "text", text: path },
+						{ type: "image", data: data.toString("base64"), mimeType: "image/png" },
+					],
+					details: { path, width, height, steps, seed } satisfies GenerateImageDetails,
+				};
+			});
 		},
 	});
 
