@@ -107,6 +107,10 @@ function requireBaseUrl(): string {
 	return url.replace(/\/+$/, "");
 }
 
+function isConfigured(): boolean {
+	return Boolean(process.env.COMFYUI_URL?.trim());
+}
+
 function resolveOutputDir(): string {
 	const configured = process.env.COMFYUI_OUTPUT_DIR?.trim();
 	if (configured) {
@@ -225,8 +229,7 @@ function timeoutError(promptId: string, seconds: number): Error {
 }
 
 export default function (pi: ExtensionAPI) {
-	pi.registerTool({
-		name: "generate_image",
+	pi.registerTool({		name: "generate_image",
 		label: "Generate Image",
 		description:
 			"Generate an image from a text prompt on the local ComfyUI instance and return it inline. " +
@@ -379,4 +382,24 @@ export default function (pi: ExtensionAPI) {
 			};
 		},
 	});
+
+	// The tool stays registered so it can appear without a restart, but is only
+	// active while COMFYUI_URL is set. setActiveTools() replaces the whole set, so
+	// the other active tools are carried over explicitly. State is read back from
+	// the live set rather than tracked locally, which keeps this idempotent and
+	// correct no matter how the tool was activated at startup.
+	const TOOL_NAME = "generate_image";
+
+	const syncActivation = () => {
+		const current = pi.getActiveTools();
+		const active = current.includes(TOOL_NAME);
+		const configured = isConfigured();
+		if (active === configured) return;
+		pi.setActiveTools(configured ? [...current, TOOL_NAME] : current.filter((name) => name !== TOOL_NAME));
+	};
+
+	// Covers startup and /reload; re-checked every turn so COMFYUI_URL can be
+	// changed in .env without needing a reload.
+	pi.on("session_start", syncActivation);
+	pi.on("before_agent_start", syncActivation);
 }
