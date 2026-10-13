@@ -1,5 +1,5 @@
 {
-  "lastChangelogVersion": "0.87.1",
+  "lastChangelogVersion": "1.1.0",
   "defaultProvider": "litellm",
   "defaultModel": "deepseek-ai/DeepSeek-V4-Flash",
   "compaction": {
@@ -32,7 +32,6 @@
       "skills": []
     },
     "npm:pi-footer",
-    "npm:pi-mcp-adapter",
     "!npm:pi-agentic-compaction",
     "!npm:pi-openplan",
     "npm:pi-interactive-shell",
@@ -78,5 +77,8 @@
   },
   "tuiMode": "regular",
   "fullscreenExitOutput": "transcript",
-  "fullscreenScrollbar": "auto"
+  "fullscreenScrollbar": "auto",
+  "extensions": [
+    "+builtin:mcp"
+  ]
 }
