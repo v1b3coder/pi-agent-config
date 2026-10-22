@@ -9,13 +9,16 @@
  * sees (it runs on a copied messages array) — the agent only received
  * "Answers recorded." and had to ask the user to repeat the answers.
  *
- * UI is identical to the original (MIT, wilfredinni/pi-openplan):
+ * UI is based on the original (MIT, wilfredinni/pi-openplan):
  * keyboard-navigable overlay with tabs, single/multi select, custom text,
- * review tab, and a rendered markdown answer block in the transcript.
+ * review tab, and a rendered markdown answer block in the transcript. It
+ * adds mandatory question context and per-option pros/cons, shown inline in
+ * the TUI and behind a details action in dialog mode.
  *
  * Mode support:
  *   - TUI: the full custom overlay (custom components are TUI-only).
- *   - RPC/IDE: select/input dialogs over the extension UI protocol.
+ *   - RPC/IDE: select/input dialogs over the extension UI protocol,
+ *     plus a details editor for the full context/comparison.
  *   - JSON/print: a text fallback asking the LLM to assume.
  *
  * Tool:
@@ -45,11 +48,20 @@ const MAX_QUESTIONS = 4;
 const MIN_OPTIONS = 2;
 const MAX_OPTIONS = 4;
 const MAX_HEADER_LENGTH = 16;
+const MIN_CONTEXT_LENGTH = 20;
+const MAX_CONTEXT_LENGTH = 400;
+const MIN_DESCRIPTION_LENGTH = 8;
+const MAX_DESCRIPTION_LENGTH = 160;
+const MIN_PRO_CON_LENGTH = 8;
+const MAX_PRO_CON_LENGTH = 160;
+const MAX_PRO_CON_ITEMS = 3;
 
 /** Sentinel option that opens free-text input in dialog mode (RPC/IDE). */
 const CUSTOM_CHOICE = "✎ Type your own answer…";
 /** Sentinel option that submits a multi-select question in dialog mode. */
 const DONE_CHOICE = "✓ Done selecting";
+/** Sentinel option that opens the full context/comparison in dialog mode. */
+const DETAILS_CHOICE = "ℹ Show context & comparison";
 /** Sentinel option that aborts the dialog flow for renderers without dismiss support. */
 const CANCEL_CHOICE = "✗ Cancel";
 
@@ -57,7 +69,14 @@ const CANCEL_CHOICE = "✗ Cancel";
 
 interface QuestionOption {
 	label: string;
+	/** What the option is, in one concrete sentence. */
 	description: string;
+	/** Concrete advantages (1-3). */
+	pros: string[];
+	/** Concrete disadvantages (1-3). */
+	cons: string[];
+	/** When this option is the right choice. */
+	bestFor?: string;
 }
 
 interface PlanQuestion {
@@ -65,8 +84,16 @@ interface PlanQuestion {
 	question: string;
 	/** Short label for tab display (max 16 chars) */
 	header: string;
+	/** Why this question is asked, constraints, and what is at stake. */
+	context: string;
+	/** Why these options were chosen and what was ruled out. */
+	rationale: string;
 	/** 2-4 predefined options */
 	options: QuestionOption[];
+	/** Label of the recommended option, or "none". */
+	recommended?: string;
+	/** Why the recommended option is preferred. */
+	recommendationReason?: string;
 	/** Allow multiple selections (checkboxes). Default: false */
 	multiSelect?: boolean;
 	/** Allow free-text "Other" answer. Default: true */
@@ -85,6 +112,111 @@ interface PlanQuestionInput {
 /** answers[i] = selected label(s) for questions[i] */
 type PlanQuestionOutput = string[][];
 
+// ── Validation ────────────────────────────────────────────────────
+
+/**
+ * Trim a required string and fail with an actionable message when it is too
+ * short. This is the real gate: provider schemas may carry minLength hints, but
+ * the model can still omit or pad fields, and pi does not guarantee schema
+ * enforcement for every provider.
+ */
+function requireText(value: string | undefined, field: string, minLength: number): string {
+	const text = value?.trim() ?? "";
+	if (text.length < minLength) {
+		throw new Error(
+			`Error: ${field} must be at least ${minLength} characters. Add concrete context so the user can understand the choice.`,
+		);
+	}
+	return text;
+}
+
+/** Validate and normalize the tool input before showing anything. */
+function validateQuestions(questions: PlanQuestion[]): void {
+	if (!Array.isArray(questions) || questions.length < 1 || questions.length > MAX_QUESTIONS) {
+		throw new Error(
+			`Error: provide 1-${MAX_QUESTIONS} questions.`,
+		);
+	}
+
+	for (const q of questions) {
+		q.question = requireText(q.question, "question text", 1);
+		q.header = requireText(q.header, "header", 1);
+		if (q.header.length > MAX_HEADER_LENGTH) {
+			q.header = q.header.slice(0, MAX_HEADER_LENGTH);
+		}
+		q.context = requireText(
+			q.context,
+			`context for "${q.header}"`,
+			MIN_CONTEXT_LENGTH,
+		);
+		q.rationale = requireText(
+			q.rationale,
+			`rationale for "${q.header}"`,
+			MIN_CONTEXT_LENGTH,
+		);
+		if (!Array.isArray(q.options) || q.options.length < MIN_OPTIONS || q.options.length > MAX_OPTIONS) {
+			throw new Error(
+				`Error: question "${q.header}" needs ${MIN_OPTIONS}-${MAX_OPTIONS} options.`,
+			);
+		}
+
+		const labels = new Set<string>();
+		for (const [index, o] of q.options.entries()) {
+			o.label = requireText(o.label, `option ${index + 1} label in "${q.header}"`, 1);
+			if (labels.has(o.label)) {
+				throw new Error(
+					`Error: duplicate option label "${o.label}" in "${q.header}". Each label must be unique.`,
+				);
+			}
+			labels.add(o.label);
+			o.description = requireText(
+				o.description,
+				`description for option "${o.label}"`,
+				MIN_DESCRIPTION_LENGTH,
+			);
+			if (!Array.isArray(o.pros) || o.pros.length === 0) {
+				throw new Error(
+					`Error: option "${o.label}" needs at least one pro. Add a concrete advantage.`,
+				);
+			}
+			if (!Array.isArray(o.cons) || o.cons.length === 0) {
+				throw new Error(
+					`Error: option "${o.label}" needs at least one con. Add a concrete disadvantage.`,
+				);
+			}
+			o.pros = o.pros.map((pro, i) =>
+				requireText(pro, `pro ${i + 1} for option "${o.label}"`, MIN_PRO_CON_LENGTH),
+			);
+			o.cons = o.cons.map((con, i) =>
+				requireText(con, `con ${i + 1} for option "${o.label}"`, MIN_PRO_CON_LENGTH),
+			);
+			if (o.bestFor !== undefined) {
+				o.bestFor = requireText(o.bestFor, `bestFor for option "${o.label}"`, 1);
+			}
+		}
+
+		if (q.recommended !== undefined) {
+			const recommended = q.recommended?.trim() ?? "";
+			if (recommended && recommended !== "none") {
+				if (!labels.has(recommended)) {
+					throw new Error(
+						`Error: recommended must be one of the option labels or "none".`,
+					);
+				}
+				q.recommended = recommended;
+				q.recommendationReason = requireText(
+					q.recommendationReason,
+					`recommendationReason for "${q.header}"`,
+					MIN_CONTEXT_LENGTH,
+				);
+			} else {
+				q.recommended = undefined;
+				q.recommendationReason = undefined;
+			}
+		}
+	}
+}
+
 // ── TUI Component ─────────────────────────────────────────────────
 
 class InterviewPrompt {
@@ -99,6 +231,8 @@ class InterviewPrompt {
 	private selectedIndex = 0;
 	private editing = false;
 	private inputBuffer = "";
+	private detailsExpanded = false;
+	private comparisonMode = false;
 
 	constructor(
 		questions: PlanQuestion[],
@@ -185,6 +319,14 @@ class InterviewPrompt {
 			return;
 		}
 
+		// ── Comparison view ───────────────────────────────────
+		if (this.comparisonMode) {
+			if (matchesKey(data, Key.escape) || data === "c") {
+				this.comparisonMode = false;
+			}
+			return;
+		}
+
 		// ── Tab navigation (multi-question / review) ───────────
 		if (this.tabCount > 1) {
 			if (
@@ -194,6 +336,7 @@ class InterviewPrompt {
 			) {
 				this.currentTab = (this.currentTab + 1) % this.tabCount;
 				this.selectedIndex = 0;
+				this.detailsExpanded = false;
 				return;
 			}
 			if (
@@ -203,6 +346,7 @@ class InterviewPrompt {
 			) {
 				this.currentTab = (this.currentTab - 1 + this.tabCount) % this.tabCount;
 				this.selectedIndex = 0;
+				this.detailsExpanded = false;
 				return;
 			}
 		}
@@ -230,6 +374,20 @@ class InterviewPrompt {
 				}
 				return;
 			}
+			return;
+		}
+
+		// ── Detail and comparison toggles ───────────────────────
+		if (this.detailsExpanded && matchesKey(data, Key.escape)) {
+			this.detailsExpanded = false;
+			return;
+		}
+		if (data === "d") {
+			this.detailsExpanded = !this.detailsExpanded;
+			return;
+		}
+		if (data === "c") {
+			this.comparisonMode = true;
 			return;
 		}
 
@@ -334,6 +492,8 @@ class InterviewPrompt {
 	 * Advance to next tab or submit if on last question (multi-question mode only).
 	 */
 	private tryAdvance(): void {
+		this.detailsExpanded = false;
+		this.comparisonMode = false;
 		if (this.tabCount <= 1) {
 			// Single-select, auto-submit
 			this.done(this.answers);
@@ -416,7 +576,9 @@ class InterviewPrompt {
 		}
 
 		// ── Content ─────────────────────────────────────────────
-		if (this.isReviewTab) {
+		if (this.comparisonMode) {
+			this.renderComparisonTab(lines, width);
+		} else if (this.isReviewTab) {
 			this.renderReviewTab(lines, width);
 		} else {
 			this.renderQuestionTab(lines, width);
@@ -459,6 +621,15 @@ class InterviewPrompt {
 		for (const line of wrappedLines) {
 			lines.push(this.contentLine(" ".repeat(MARGIN) + line, width));
 		}
+
+		// ── Question context ────────────────────────────────────
+		this.pushWrappedText(
+			lines,
+			width,
+			MARGIN,
+			`Context: ${q.context}`,
+			"muted",
+		);
 		lines.push(this.spacerLine(width));
 
 		// ── Options ─────────────────────────────────────────────
@@ -466,11 +637,13 @@ class InterviewPrompt {
 			const isSel = i === this.selectedIndex;
 			const isPicked =
 				this.answers[this.currentTab]?.includes(opt.label) ?? false;
+			const isRecommended = q.recommended === opt.label;
 
 			const number = optNumber(i, isPicked);
 			const prefix = optPrefix(isSel);
+			const star = isRecommended ? ` ${t.fg("success", "★")}` : "";
 			// prefix + number + 2 spaces + label
-			const labelContent = `${prefix}${number}  ${opt.label}`;
+			const labelContent = `${prefix}${number}  ${opt.label}${star}`;
 
 			const styled = isSel
 				? t.fg("accent", labelContent)
@@ -481,11 +654,16 @@ class InterviewPrompt {
 			lines.push(this.contentLine(styled, width));
 
 			// Description (indented to align with the label text)
-			if (opt.description) {
+			if (opt.description && !(isSel && this.detailsExpanded)) {
 				const descContent = isSel
 					? `${descIndent}${t.fg("accent", opt.description)}`
 					: `${descIndent}${t.fg("muted", opt.description)}`;
 				lines.push(this.contentLine(descContent, width));
+			}
+
+			// Detail pane: pros/cons/bestFor for the highlighted option.
+			if (isSel && this.detailsExpanded) {
+				this.renderOptionDetail(lines, width, opt, descIndent.length);
 			}
 		}
 
@@ -530,15 +708,134 @@ class InterviewPrompt {
 		lines.push(this.spacerLine(width));
 
 		// ── Help bar (inside border) ────────────────────────────
+		const detailsHint = this.detailsExpanded ? "hide" : "details";
 		let help = "";
 		if (this.isMultiSelect) {
-			help = `${t.fg("dim", "↑↓")} navigate  ${t.fg("dim", "enter")} toggle  ${t.fg("dim", "esc")} done`;
+			help = `${t.fg("dim", "↑↓")} navigate  ${t.fg("dim", "enter")} toggle  ${t.fg("dim", "d")} ${detailsHint}  ${t.fg("dim", "c")} compare  ${t.fg("dim", "esc")} done`;
 		} else if (this.tabCount > 1) {
-			help = `${t.fg("dim", "⇆ tab")}  ${t.fg("dim", "↑↓")} select  ${t.fg("dim", "1-")}${Math.min(this.totalOptions, 9)}${t.fg("dim", "")} pick  ${t.fg("dim", "enter")} confirm`;
+			help = `${t.fg("dim", "⇆ tab")}  ${t.fg("dim", "↑↓")} select  ${t.fg("dim", "1-")}${Math.min(this.totalOptions, 9)}${t.fg("dim", "")} pick  ${t.fg("dim", "d")} ${detailsHint}  ${t.fg("dim", "c")} compare  ${t.fg("dim", "enter")} confirm`;
 		} else {
-			help = `${t.fg("dim", "↑↓")} select  ${t.fg("dim", "1-")}${Math.min(this.totalOptions, 9)}${t.fg("dim", "")} pick  ${t.fg("dim", "enter")} confirm  ${t.fg("dim", "esc")} dismiss`;
+			help = `${t.fg("dim", "↑↓")} select  ${t.fg("dim", "1-")}${Math.min(this.totalOptions, 9)}${t.fg("dim", "")} pick  ${t.fg("dim", "d")} ${detailsHint}  ${t.fg("dim", "c")} compare  ${t.fg("dim", "enter")} confirm  ${t.fg("dim", "esc")} dismiss`;
 		}
 		lines.push(this.contentLine(" ".repeat(MARGIN) + help, width));
+	}
+
+	/** Render one option's full context in the detail/comparison views. */
+	private renderOptionDetail(
+		lines: string[],
+		width: number,
+		opt: QuestionOption,
+		indent: number,
+	): void {
+		this.pushWrappedText(lines, width, indent, opt.description, "text");
+		for (const pro of opt.pros) {
+			this.pushBullet(lines, width, indent, "+", pro, "success");
+		}
+		for (const con of opt.cons) {
+			this.pushBullet(lines, width, indent, "−", con, "warning");
+		}
+		if (opt.bestFor) {
+			this.pushWrappedText(
+				lines,
+				width,
+				indent,
+				`Best for: ${opt.bestFor}`,
+				"muted",
+			);
+		}
+	}
+
+	/** Full comparison view: context, rationale, every option, recommendation. */
+	private renderComparisonTab(lines: string[], width: number): void {
+		const t = this.theme;
+		const q = this.currentQuestion;
+		if (!q) return;
+		const MARGIN = 2;
+
+		lines.push(
+			this.contentLine(
+				" ".repeat(MARGIN) + t.fg("text", "Comparison"),
+				width,
+			),
+		);
+		this.pushWrappedText(lines, width, MARGIN, `Context: ${q.context}`, "muted");
+		this.pushWrappedText(
+			lines,
+			width,
+			MARGIN,
+			`Why these options: ${q.rationale}`,
+			"muted",
+		);
+		lines.push(this.spacerLine(width));
+
+		for (const [i, opt] of q.options.entries()) {
+			const isRecommended = q.recommended === opt.label;
+			const heading = `${i + 1}. ${opt.label}${isRecommended ? " ★ recommended" : ""}`;
+			lines.push(
+				this.contentLine(
+					" ".repeat(MARGIN) +
+						t.fg(isRecommended ? "success" : "accent", heading),
+					width,
+				),
+			);
+			this.renderOptionDetail(lines, width, opt, MARGIN + 2);
+			lines.push(this.spacerLine(width));
+		}
+
+		if (q.recommended && q.recommended !== "none" && q.recommendationReason) {
+			this.pushWrappedText(
+				lines,
+				width,
+				MARGIN,
+				`Recommended: ${q.recommended} — ${q.recommendationReason}`,
+				"success",
+			);
+		}
+
+		lines.push(this.spacerLine(width));
+		lines.push(
+			this.contentLine(
+				" ".repeat(MARGIN) +
+					`${t.fg("dim", "c")} back  ${t.fg("dim", "esc")} back`,
+				width,
+			),
+		);
+	}
+
+	/** Wrap plain text to the inner width and render it at a fixed indent. */
+	private pushWrappedText(
+		lines: string[],
+		width: number,
+		indent: number,
+		text: string,
+		color: ThemeColor,
+	): void {
+		const prefix = " ".repeat(indent);
+		const available = Math.max(1, width - 4 - indent);
+		const wrapped = wrapTextWithAnsi(text, available);
+		for (const line of wrapped) {
+			lines.push(this.contentLine(prefix + this.theme.fg(color, line), width));
+		}
+	}
+
+	/** Render a wrapped `+`/`−` bullet with a hanging indent. */
+	private pushBullet(
+		lines: string[],
+		width: number,
+		indent: number,
+		marker: string,
+		text: string,
+		color: ThemeColor,
+	): void {
+		const indentText = " ".repeat(indent);
+		const prefix = `${indentText}${this.theme.fg(color, marker)} `;
+		const available = Math.max(1, width - 4 - visibleWidth(prefix));
+		const wrapped = wrapTextWithAnsi(text, available);
+		for (const [i, line] of wrapped.entries()) {
+			const content =
+				i === 0 ? `${prefix}${line}` : `${indentText}  ${line}`;
+			lines.push(this.contentLine(content, width));
+		}
 	}
 
 	/**
@@ -633,14 +930,54 @@ function deliverAnswers(
 }
 
 /**
+ * Format the full question context and option comparison for dialog mode.
+ * The RPC select protocol only accepts strings, so the full comparison is shown
+ * in a separate multi-line editor instead of being crammed into the option list.
+ */
+function formatComparison(q: PlanQuestion): string {
+	const lines: string[] = [
+		`Context: ${q.context}`,
+		`Why these options: ${q.rationale}`,
+	];
+
+	for (const [i, opt] of q.options.entries()) {
+		const recommended = q.recommended === opt.label ? " ★ recommended" : "";
+		lines.push("");
+		lines.push(`${i + 1}. ${opt.label}${recommended}`);
+		lines.push(`   ${opt.description}`);
+		for (const pro of opt.pros) lines.push(`   + ${pro}`);
+		for (const con of opt.cons) lines.push(`   − ${con}`);
+		if (opt.bestFor) lines.push(`   Best for: ${opt.bestFor}`);
+	}
+
+	if (q.recommended && q.recommended !== "none" && q.recommendationReason) {
+		lines.push("");
+		lines.push(`Recommended: ${q.recommended} — ${q.recommendationReason}`);
+	}
+
+	return lines.join("\n");
+}
+
+/** Show the full context/comparison in a multi-line editor. */
+async function showDetails(ui: ExtensionUIContext, q: PlanQuestion): Promise<void> {
+	await ui.editor(`Details: ${q.header} — Esc to close`, formatComparison(q));
+}
+
+/** Short option line for the dialog select list. */
+function formatOptionSummary(q: PlanQuestion, opt: QuestionOption, index: number): string {
+	const recommended = q.recommended === opt.label ? " ★" : "";
+	return `${index + 1}. ${opt.label}${recommended} — ${opt.description}`;
+}
+
+/**
  * Ask all questions through the extension UI dialog protocol
  * (`ui.select` / `ui.input`), which works in RPC/IDE mode where `ui.custom()`
  * is unavailable. Returns null when the user dismisses a question, mirroring
  * the TUI's Escape behavior.
  *
- * Every select dialog ends with an explicit cancel item: some client renderers
- * never send the `cancelled: true` response, so a visible way out must exist
- * in the option list itself.
+ * Every select dialog ends with explicit details and cancel items: some client
+ * renderers never send the `cancelled: true` response, so a visible way out must
+ * exist in the option list itself.
  */
 async function askQuestionsViaDialogs(
 	ui: ExtensionUIContext,
@@ -660,15 +997,21 @@ async function askQuestionsViaDialogs(
 			let customText = "";
 			for (;;) {
 				const options = q.options.map(
-					(o, i) => `${picked.has(o.label) ? "☑" : "☐"} ${i + 1}. ${o.label}`,
+					(o, i) =>
+						`${picked.has(o.label) ? "☑" : "☐"} ${formatOptionSummary(q, o, i)}`,
 				);
 				options.push(DONE_CHOICE);
 				if (allowCustom) options.push(CUSTOM_CHOICE);
+				options.push(DETAILS_CHOICE);
 				options.push(CANCEL_CHOICE);
 
 				const choice = await ui.select(title, options, { signal });
 				if (choice === undefined || choice === CANCEL_CHOICE) return null;
 				if (choice === DONE_CHOICE) break;
+				if (choice === DETAILS_CHOICE) {
+					await showDetails(ui, q);
+					continue;
+				}
 				if (allowCustom && choice === CUSTOM_CHOICE) {
 					const text = await ui.input(title, "Type your answer", { signal });
 					if (text === undefined) continue; // back to the options
@@ -690,12 +1033,17 @@ async function askQuestionsViaDialogs(
 
 		// Single-select: pick an option or type a custom answer.
 		for (;;) {
-			const options = q.options.map((o, i) => `${i + 1}. ${o.label}`);
+			const options = q.options.map((o, i) => formatOptionSummary(q, o, i));
 			if (allowCustom) options.push(CUSTOM_CHOICE);
+			options.push(DETAILS_CHOICE);
 			options.push(CANCEL_CHOICE);
 
 			const choice = await ui.select(title, options, { signal });
 			if (choice === undefined || choice === CANCEL_CHOICE) return null;
+			if (choice === DETAILS_CHOICE) {
+				await showDetails(ui, q);
+				continue;
+			}
 			if (allowCustom && choice === CUSTOM_CHOICE) {
 				const text = await ui.input(title, "Type your answer", { signal });
 				if (text === undefined) continue; // back to the options
@@ -727,10 +1075,13 @@ export default function interviewExtension(pi: ExtensionAPI): void {
 		name: "interview",
 		label: "Ask Questions",
 		description:
-			"Ask structured clarifying questions. Supports single-select, multi-select, and custom text. Batch up to 4 questions per call.",
+			"Ask structured clarifying questions with mandatory context. Each question needs context and rationale; each option needs a description, pros, cons, and optional bestFor. Supports single-select, multi-select, and custom text. Batch up to 4 questions per call.",
 		promptSnippet: "Ask structured clarifying questions",
 		promptGuidelines: [
 			"Use interview instead of asking inline. Batch up to 4 questions, 2-4 options each, headers ≤16 chars.",
+			"Every question must include context (why it matters, constraints, what is at stake) and rationale (why these options, what was ruled out).",
+			"Every option must include a concrete description, at least one pro and one con, and bestFor when it helps. No generic filler like 'good' or 'bad'.",
+			"When you have a preference, set recommended to an option label (or 'none') and explain it in recommendationReason.",
 		],
 		parameters: Type.Object({
 			questions: Type.Array(
@@ -741,20 +1092,74 @@ export default function interviewExtension(pi: ExtensionAPI): void {
 					header: Type.String({
 						description: "Tab label, ≤16 chars",
 					}),
+					context: Type.String({
+						minLength: MIN_CONTEXT_LENGTH,
+						maxLength: MAX_CONTEXT_LENGTH,
+						description:
+							"Why this question is asked, constraints, and what is at stake",
+					}),
+					rationale: Type.String({
+						minLength: MIN_CONTEXT_LENGTH,
+						maxLength: MAX_CONTEXT_LENGTH,
+						description:
+							"Why these options were chosen and what was ruled out",
+					}),
 					options: Type.Array(
 						Type.Object({
 							label: Type.String({
 								description: "Option label",
 							}),
 							description: Type.String({
-								description: "Option description",
+								minLength: MIN_DESCRIPTION_LENGTH,
+								maxLength: MAX_DESCRIPTION_LENGTH,
+								description:
+									"What the option is, in one concrete sentence",
 							}),
+							pros: Type.Array(
+								Type.String({
+									minLength: MIN_PRO_CON_LENGTH,
+									maxLength: MAX_PRO_CON_LENGTH,
+								}),
+								{
+									minItems: 1,
+									maxItems: MAX_PRO_CON_ITEMS,
+									description: "Concrete advantages (1-3)",
+								},
+							),
+							cons: Type.Array(
+								Type.String({
+									minLength: MIN_PRO_CON_LENGTH,
+									maxLength: MAX_PRO_CON_LENGTH,
+								}),
+								{
+									minItems: 1,
+									maxItems: MAX_PRO_CON_ITEMS,
+									description: "Concrete disadvantages (1-3)",
+								},
+							),
+							bestFor: Type.Optional(
+								Type.String({
+									maxLength: MAX_DESCRIPTION_LENGTH,
+									description: "When this option is the right choice",
+								}),
+							),
 						}),
 						{
 							minItems: MIN_OPTIONS,
 							maxItems: MAX_OPTIONS,
 							description: "2-4 options",
 						},
+					),
+					recommended: Type.Optional(
+						Type.String({
+							description: 'Label of the recommended option, or "none"',
+						}),
+					),
+					recommendationReason: Type.Optional(
+						Type.String({
+							maxLength: MAX_CONTEXT_LENGTH,
+							description: "Why the recommended option is preferred",
+						}),
 					),
 					multiSelect: Type.Optional(
 						Type.Boolean({
@@ -778,21 +1183,7 @@ export default function interviewExtension(pi: ExtensionAPI): void {
 			const input = params as unknown as PlanQuestionInput;
 
 			// Validate input — throw to signal errors (per pi docs: returning isError:true has no effect)
-			for (const q of input.questions) {
-				if (!q.question?.trim()) {
-					throw new Error(
-						"Error: question text is empty. Each question must have non-empty text.",
-					);
-				}
-				if (!q.header?.trim()) {
-					throw new Error(
-						`Error: header is empty for question "${q.question.slice(0, 40)}...". Each question needs a short header label.`,
-					);
-				}
-				if (q.header.length > MAX_HEADER_LENGTH) {
-					q.header = q.header.slice(0, MAX_HEADER_LENGTH);
-				}
-			}
+			validateQuestions(input.questions);
 
 			// TUI: present the custom overlay. `custom()` is TUI-only — in RPC
 			// mode it returns undefined — so guard by mode, not by hasUI.
@@ -832,10 +1223,25 @@ export default function interviewExtension(pi: ExtensionAPI): void {
 
 			// Non-interactive mode (print / JSON): return questions as text
 			const questionText = input.questions
-				.map(
-					(q, i) =>
-						`Question ${i + 1}: ${q.question}\nOptions:\n${q.options.map((o, j) => `  ${j + 1}. ${o.label} — ${o.description}`).join("\n")}${q.custom !== false ? `\n  or type your own answer` : ""}`,
-				)
+				.map((q, i) => {
+					const options = q.options
+						.map((o, j) => {
+							const recommended =
+								q.recommended === o.label ? " ★ recommended" : "";
+							const pros = o.pros.map((pro) => `      + ${pro}`).join("\n");
+							const cons = o.cons.map((con) => `      − ${con}`).join("\n");
+							const bestFor = o.bestFor ? `\n      Best for: ${o.bestFor}` : "";
+							return `  ${j + 1}. ${o.label}${recommended} — ${o.description}\n${pros}\n${cons}${bestFor}`;
+						})
+						.join("\n");
+					const recommendation =
+						q.recommended &&
+						q.recommended !== "none" &&
+						q.recommendationReason
+							? `\nRecommended: ${q.recommended} — ${q.recommendationReason}`
+							: "";
+					return `Question ${i + 1}: ${q.question}\nContext: ${q.context}\nWhy these options: ${q.rationale}\nOptions:\n${options}${recommendation}${q.custom !== false ? "\n  or type your own answer" : ""}`;
+				})
 				.join("\n\n");
 
 			const nonInteractiveResponse = `This terminal does not support interactive questions. Make reasonable assumptions based on the context:\n\n${questionText}`;
