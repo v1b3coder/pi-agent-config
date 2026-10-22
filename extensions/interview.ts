@@ -12,13 +12,14 @@
  * UI is based on the original (MIT, wilfredinni/pi-openplan):
  * keyboard-navigable overlay with tabs, single/multi select, custom text,
  * review tab, and a rendered markdown answer block in the transcript. It
- * adds mandatory question context and per-option pros/cons, shown inline in
- * the TUI and behind a details action in dialog mode.
+ * adds mandatory question context and per-option pros/cons. The TUI shows
+ * them inline and expandable; dialog mode inlines a compact context into every
+ * option string so there is no separate details step.
  *
  * Mode support:
  *   - TUI: the full custom overlay (custom components are TUI-only).
- *   - RPC/IDE: select/input dialogs over the extension UI protocol,
- *     plus a details editor for the full context/comparison.
+ *   - RPC/IDE: select/input dialogs over the extension UI protocol, with
+ *     option context inlined into each select entry.
  *   - JSON/print: a text fallback asking the LLM to assume.
  *
  * Tool:
@@ -60,8 +61,6 @@ const MAX_PRO_CON_ITEMS = 3;
 const CUSTOM_CHOICE = "✎ Type your own answer…";
 /** Sentinel option that submits a multi-select question in dialog mode. */
 const DONE_CHOICE = "✓ Done selecting";
-/** Sentinel option that opens the full context/comparison in dialog mode. */
-const DETAILS_CHOICE = "ℹ Show context & comparison";
 /** Sentinel option that aborts the dialog flow for renderers without dismiss support. */
 const CANCEL_CHOICE = "✗ Cancel";
 
@@ -930,43 +929,20 @@ function deliverAnswers(
 }
 
 /**
- * Format the full question context and option comparison for dialog mode.
- * The RPC select protocol only accepts strings, so the full comparison is shown
- * in a separate multi-line editor instead of being crammed into the option list.
+ * Format one option with its context inlined. The RPC select protocol only
+ * accepts strings, so pros, cons, and bestFor travel with the option itself
+ * instead of behind a separate details action.
  */
-function formatComparison(q: PlanQuestion): string {
-	const lines: string[] = [
-		`Context: ${q.context}`,
-		`Why these options: ${q.rationale}`,
-	];
-
-	for (const [i, opt] of q.options.entries()) {
-		const recommended = q.recommended === opt.label ? " ★ recommended" : "";
-		lines.push("");
-		lines.push(`${i + 1}. ${opt.label}${recommended}`);
-		lines.push(`   ${opt.description}`);
-		for (const pro of opt.pros) lines.push(`   + ${pro}`);
-		for (const con of opt.cons) lines.push(`   − ${con}`);
-		if (opt.bestFor) lines.push(`   Best for: ${opt.bestFor}`);
-	}
-
-	if (q.recommended && q.recommended !== "none" && q.recommendationReason) {
-		lines.push("");
-		lines.push(`Recommended: ${q.recommended} — ${q.recommendationReason}`);
-	}
-
-	return lines.join("\n");
-}
-
-/** Show the full context/comparison in a multi-line editor. */
-async function showDetails(ui: ExtensionUIContext, q: PlanQuestion): Promise<void> {
-	await ui.editor(`Details: ${q.header} — Esc to close`, formatComparison(q));
-}
-
-/** Short option line for the dialog select list. */
 function formatOptionSummary(q: PlanQuestion, opt: QuestionOption, index: number): string {
 	const recommended = q.recommended === opt.label ? " ★" : "";
-	return `${index + 1}. ${opt.label}${recommended} — ${opt.description}`;
+	const pros = opt.pros.map((pro) => `+ ${pro}`).join(" · ");
+	const cons = opt.cons.map((con) => `− ${con}`).join(" · ");
+	const bestFor = opt.bestFor ? ` · Best for: ${opt.bestFor}` : "";
+	const recommendation =
+		q.recommended === opt.label && q.recommendationReason
+			? ` · Why recommended: ${q.recommendationReason}`
+			: "";
+	return `${index + 1}. ${opt.label}${recommended} — ${opt.description}\n${pros} · ${cons}${bestFor}${recommendation}`;
 }
 
 /**
@@ -975,9 +951,9 @@ function formatOptionSummary(q: PlanQuestion, opt: QuestionOption, index: number
  * is unavailable. Returns null when the user dismisses a question, mirroring
  * the TUI's Escape behavior.
  *
- * Every select dialog ends with explicit details and cancel items: some client
- * renderers never send the `cancelled: true` response, so a visible way out must
- * exist in the option list itself.
+ * Every select dialog ends with an explicit cancel item: some client renderers
+ * never send the `cancelled: true` response, so a visible way out must exist
+ * in the option list itself.
  */
 async function askQuestionsViaDialogs(
 	ui: ExtensionUIContext,
@@ -1002,16 +978,11 @@ async function askQuestionsViaDialogs(
 				);
 				options.push(DONE_CHOICE);
 				if (allowCustom) options.push(CUSTOM_CHOICE);
-				options.push(DETAILS_CHOICE);
 				options.push(CANCEL_CHOICE);
 
 				const choice = await ui.select(title, options, { signal });
 				if (choice === undefined || choice === CANCEL_CHOICE) return null;
 				if (choice === DONE_CHOICE) break;
-				if (choice === DETAILS_CHOICE) {
-					await showDetails(ui, q);
-					continue;
-				}
 				if (allowCustom && choice === CUSTOM_CHOICE) {
 					const text = await ui.input(title, "Type your answer", { signal });
 					if (text === undefined) continue; // back to the options
@@ -1035,15 +1006,10 @@ async function askQuestionsViaDialogs(
 		for (;;) {
 			const options = q.options.map((o, i) => formatOptionSummary(q, o, i));
 			if (allowCustom) options.push(CUSTOM_CHOICE);
-			options.push(DETAILS_CHOICE);
 			options.push(CANCEL_CHOICE);
 
 			const choice = await ui.select(title, options, { signal });
 			if (choice === undefined || choice === CANCEL_CHOICE) return null;
-			if (choice === DETAILS_CHOICE) {
-				await showDetails(ui, q);
-				continue;
-			}
 			if (allowCustom && choice === CUSTOM_CHOICE) {
 				const text = await ui.input(title, "Type your answer", { signal });
 				if (text === undefined) continue; // back to the options
