@@ -19,7 +19,9 @@
  * Mode support:
  *   - TUI: the full custom overlay (custom components are TUI-only).
  *   - RPC/IDE: select/input dialogs over the extension UI protocol, with
- *     option context inlined into each select entry.
+ *     option context inlined into each select entry. Multi-select dialogs are
+ *     answered natively (one select, `{"piMultiSelect": [...]}`) by clients
+ *     that render checkboxes, and with a one-select-per-toggle loop by the rest.
  *   - JSON/print: a text fallback asking the LLM to assume.
  *
  * Tool:
@@ -59,8 +61,12 @@ const MAX_PRO_CON_ITEMS = 3;
 
 /** Sentinel option that opens free-text input in dialog mode (RPC/IDE). */
 const CUSTOM_CHOICE = "✎ Type your own answer…";
-/** Sentinel option that submits a multi-select question in dialog mode. */
+/** Sentinel option that submits a multi-select question in dialog mode. A
+ * client with native multi-select support (T3 Code) strips it and renders
+ * checkboxes instead; the rest pick it after toggling options. */
 const DONE_CHOICE = "✓ Done selecting";
+/** JSON key a native multi-select client uses to return the checked options. */
+const NATIVE_MULTI_SELECT_KEY = "piMultiSelect";
 /** Sentinel option that aborts the dialog flow for renderers without dismiss support. */
 const CANCEL_CHOICE = "✗ Cancel";
 
@@ -946,6 +952,45 @@ function formatOptionSummary(q: PlanQuestion, opt: QuestionOption, index: number
 }
 
 /**
+ * Build a multi-select dialog's option list. Legacy clients re-ask after
+ * every toggle, so only those rounds mark the checked options.
+ */
+function multiSelectOptions(
+	q: PlanQuestion,
+	picked: ReadonlySet<string>,
+	allowCustom: boolean,
+	markPicked: boolean,
+): string[] {
+	const options = q.options.map((option, index) => {
+		const summary = formatOptionSummary(q, option, index);
+		return markPicked
+			? `${picked.has(option.label) ? "☑" : "☐"} ${summary}`
+			: summary;
+	});
+	options.push(DONE_CHOICE);
+	if (allowCustom) options.push(CUSTOM_CHOICE);
+	options.push(CANCEL_CHOICE);
+	return options;
+}
+
+/**
+ * Parse a native multi-select answer (`{"piMultiSelect": [...]}`). Returns
+ * null for the legacy single-value response so the caller keeps the toggle loop.
+ */
+function parseNativeMultiSelect(choice: string | undefined): string[] | null {
+	if (!choice) return null;
+	try {
+		const parsed: unknown = JSON.parse(choice);
+		if (typeof parsed !== "object" || parsed === null) return null;
+		const values = (parsed as Record<string, unknown>)[NATIVE_MULTI_SELECT_KEY];
+		if (!Array.isArray(values)) return null;
+		return values.filter((value): value is string => typeof value === "string");
+	} catch {
+		return null;
+	}
+}
+
+/**
  * Ask all questions through the extension UI dialog protocol
  * (`ui.select` / `ui.input`), which works in RPC/IDE mode where `ui.custom()`
  * is unavailable. Returns null when the user dismisses a question, mirroring
@@ -969,34 +1014,54 @@ async function askQuestionsViaDialogs(
 			: q.question;
 
 		if (q.multiSelect) {
+			// Native multi-select clients (T3 Code) answer one select with a JSON
+			// array: their adapter strips DONE_CHOICE and renders checkboxes.
+			const nativeChoice = await ui.select(
+				title,
+				multiSelectOptions(q, new Set(), allowCustom, false),
+				{ signal },
+			);
+			if (nativeChoice === undefined || nativeChoice === CANCEL_CHOICE) return null;
+
+			const nativePicks = parseNativeMultiSelect(nativeChoice);
+			if (nativePicks !== null) {
+				if (nativePicks.includes(CANCEL_CHOICE)) return null;
+				const picked = nativePicks.filter(
+					(value) => value !== CUSTOM_CHOICE && value !== DONE_CHOICE,
+				);
+				let customText = "";
+				if (allowCustom && nativePicks.includes(CUSTOM_CHOICE)) {
+					const text = await ui.input(title, "Type your answer", { signal });
+					// Keep the checked options when the custom entry is cancelled.
+					if (text !== undefined) customText = text.trim();
+				}
+				answers.push([...picked, ...(customText ? [customText] : [])]);
+				continue;
+			}
+
+			// Legacy clients: one select per toggle.
 			const picked = new Set<string>();
 			let customText = "";
+			let choice: string | undefined = nativeChoice;
+			let options = multiSelectOptions(q, picked, allowCustom, false);
 			for (;;) {
-				const options = q.options.map(
-					(o, i) =>
-						`${picked.has(o.label) ? "☑" : "☐"} ${formatOptionSummary(q, o, i)}`,
-				);
-				options.push(DONE_CHOICE);
-				if (allowCustom) options.push(CUSTOM_CHOICE);
-				options.push(CANCEL_CHOICE);
-
-				const choice = await ui.select(title, options, { signal });
 				if (choice === undefined || choice === CANCEL_CHOICE) return null;
 				if (choice === DONE_CHOICE) break;
 				if (allowCustom && choice === CUSTOM_CHOICE) {
 					const text = await ui.input(title, "Type your answer", { signal });
-					if (text === undefined) continue; // back to the options
-					customText = text.trim();
-					continue;
-				}
-
-				const opt = q.options[options.indexOf(choice)];
-				if (!opt) continue;
-				if (picked.has(opt.label)) {
-					picked.delete(opt.label);
+					if (text !== undefined) customText = text.trim();
 				} else {
-					picked.add(opt.label);
+					const opt = q.options[options.indexOf(choice)];
+					if (opt) {
+						if (picked.has(opt.label)) {
+							picked.delete(opt.label);
+						} else {
+							picked.add(opt.label);
+						}
+					}
 				}
+				options = multiSelectOptions(q, picked, allowCustom, true);
+				choice = await ui.select(title, options, { signal });
 			}
 			answers.push([...picked, ...(customText ? [customText] : [])]);
 			continue;
