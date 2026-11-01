@@ -6,7 +6,7 @@
 // Temp names were used during development to coexist with installed pi-goal-x.
 // ────────────────────────────────────────────────────────────────────────────
 
-import { defineTool, createAgentSession, createExtensionRuntime, SessionManager, SettingsManager, ModelRuntime, getAgentDir, type ExtensionAPI, type ExtensionContext, type Theme, type ResourceLoader } from "@earendil-works/pi-coding-agent";
+import { defineTool, createAgentSession, createExtensionRuntime, SessionManager, SettingsManager, ModelRuntime, getAgentDir, keyHint, type ExtensionAPI, type ExtensionContext, type Theme, type ResourceLoader } from "@earendil-works/pi-coding-agent";
 import { Text, matchesKey } from "@earendil-works/pi-tui";
 import { Type, isContextOverflow } from "@earendil-works/pi-ai";
 import { join } from "node:path";
@@ -25,6 +25,13 @@ const CLEAR_WORDS = new Set(["clear", "cancel", "abort", "end", "quit", "reset"]
 const RESUME_WORDS = new Set(["resume", "continue"]);
 // An auditor run must not hang update_goal forever if its model loops on tool calls.
 const AUDITOR_TIMEOUT_MS = 100 * 60 * 1000;
+// Audit progress goes through the update_goal partial tool result: every client
+// updates that single row in place. ctx.ui.notify is the wrong channel — RPC
+// clients turn each notify into its own transcript item (T3 Code renders one
+// "notify" tool row per message), so a multi-minute audit produced hundreds of
+// rows and none of the report.
+const AUDITOR_PROGRESS_MS = 300;
+const AUDITOR_ACTIVITY_LINES = 4;
 // UI dialogs need a timeout: RPC/IDE clients may never answer a request, and an
 // unanswered confirm would hang the tool (or the /goal command) forever.
 const DIALOG_TIMEOUT_MS = 5 * 60 * 1000;
@@ -138,8 +145,22 @@ function makeAuditorLoader(): ResourceLoader {
 
 
 
-async function runAuditor(ctx: ExtensionContext, state: GoalState, claim: string, thinkingLevel: NonNullable<Parameters<typeof createAgentSession>[0]>["thinkingLevel"], signal?: AbortSignal): Promise<{ approved: boolean; output: string; error?: string }> {
-	const parts: string[] = [];
+// One line for the progress snapshot: the inspected file, pattern, or command.
+function auditActivity(toolName: string, args: unknown): string {
+	const a = (args ?? {}) as Record<string, unknown>;
+	const detail = ["path", "pattern", "command"]
+		.map((key) => a[key])
+		.find((v): v is string => typeof v === "string" && v.trim().length > 0);
+	return detail ? `${toolName} ${detail}` : toolName;
+}
+
+async function runAuditor(ctx: ExtensionContext, state: GoalState, claim: string, thinkingLevel: NonNullable<Parameters<typeof createAgentSession>[0]>["thinkingLevel"], signal?: AbortSignal, onProgress?: (snapshot: string) => void): Promise<{ approved: boolean; output: string; error?: string }> {
+	// Assistant text is the audit report; thinking stays out of it and only
+	// feeds the live progress line.
+	const report: string[] = [];
+	const reasoning: string[] = [];
+	const reportText = () => report.join("").trim();
+	const auditText = () => reportText() || reasoning.join("").trim();
 	// Set when the auditor's model reports a context-window overflow. Without
 	// this the auditor silently returns an empty report and update_goal reports a
 	// misleading "rejected" with no findings.
@@ -148,11 +169,28 @@ async function runAuditor(ctx: ExtensionContext, state: GoalState, claim: string
 	// calls would otherwise block update_goal forever.
 	let timedOut = false;
 	const AUDITOR_STATUS_KEY = "pi-goal-auditor-stream";
-	let notifyTimer: ReturnType<typeof setTimeout> | null = null;
-	const flushNotify = () => {
-		notifyTimer = null;
-		const text = parts.join("").trim().slice(-300); // last 300 chars
-		if (text) ctx.ui.notify(`🔍 Auditor: ${text}`, "info");
+	const startedAt = Date.now();
+	const activity: string[] = [];
+	let current = "";
+	let currentIsThinking = false;
+	let toolCalls = 0;
+	let lastProgressAt = 0;
+
+	const emitProgress = (force = false) => {
+		if (!onProgress) return;
+		const now = Date.now();
+		if (!force && now - lastProgressAt < AUDITOR_PROGRESS_MS) return;
+		lastProgressAt = now;
+		const elapsed = fmtTime(Math.round((now - startedAt) / 1000));
+		const calls = `${toolCalls} tool call${toolCalls === 1 ? "" : "s"}`;
+		const lines = [`🔍 Auditor · ${elapsed} · ${calls}`, ...activity];
+		if (current) lines.push(`${currentIsThinking ? "💭" : "✎"} ${current}`);
+		onProgress(lines.join("\n"));
+	};
+	const addActivity = (line: string) => {
+		activity.push(truncate(line, 100));
+		if (activity.length > AUDITOR_ACTIVITY_LINES) activity.shift();
+		emitProgress(true);
 	};
 
 	try {
@@ -184,6 +222,7 @@ async function runAuditor(ctx: ExtensionContext, state: GoalState, claim: string
 		});
 
 		ctx.ui.setStatus(AUDITOR_STATUS_KEY, "🔍 Auditor: inspecting workspace...");
+		emitProgress(true);
 
 		const killSession = () => session.abort();
 		signal?.addEventListener("abort", killSession, { once: true });
@@ -195,13 +234,22 @@ async function runAuditor(ctx: ExtensionContext, state: GoalState, claim: string
 					(ame?.type === "text_delta" || ame?.type === "thinking_delta") &&
 					typeof ame.delta === "string"
 				) {
-					parts.push(ame.delta);
-					const acc = parts.join("");
-					const lastLine = acc.trim().split("\n").pop() ?? "";
-					ctx.ui.setStatus(AUDITOR_STATUS_KEY, `🔍 Auditor: ${truncate(lastLine, 80)}`);
-					// Debounced notify so the user sees streaming output every ~400ms
-					if (!notifyTimer) notifyTimer = setTimeout(flushNotify, 400);
+					const thinking = ame.type === "thinking_delta";
+					(thinking ? reasoning : report).push(ame.delta);
+					const acc = (thinking ? reasoning : report).join("").trim();
+					current = truncate(acc.split("\n").pop() ?? "", 100);
+					currentIsThinking = thinking;
+					emitProgress();
 				}
+				return;
+			}
+			if (event.type === "tool_execution_start") {
+				toolCalls++;
+				addActivity(`→ ${auditActivity(event.toolName, event.args)}`);
+				return;
+			}
+			if (event.type === "tool_execution_end") {
+				addActivity(`${event.isError ? "✗" : "✓"} ${event.toolName}`);
 				return;
 			}
 			if (event.type === "message_end") {
@@ -217,11 +265,12 @@ async function runAuditor(ctx: ExtensionContext, state: GoalState, claim: string
 				for (const p of msg.content ?? []) {
 					if (p.type === "text" && typeof p.text === "string") {
 						// Avoid duplicating text already captured via deltas
-						if (!parts.join("").trim().endsWith(p.text.trim())) {
-							parts.push(p.text);
+						if (!reportText().endsWith(p.text.trim())) {
+							report.push(p.text);
 						}
 					}
 				}
+				emitProgress(true);
 			}
 		});
 
@@ -233,28 +282,30 @@ async function runAuditor(ctx: ExtensionContext, state: GoalState, claim: string
 			await session.prompt(buildAuditPrompt(state, claim));
 			// Reasoning models sometimes loop on tool calls and end with no
 			// final text.  Ask once more, explicitly, for the verdict.
-			if (!timedOut && !/<(?:approved|disapproved)\s*\/>/.test(parts.join(""))) {
+			if (!timedOut && !/<(?:approved|disapproved)\s*\/>/.test(auditText())) {
 				await session.prompt(
 					"Stop inspecting now and report. End with exactly <approved/> or <disapproved/>.",
 				);
 			}
 		} finally {
 			clearTimeout(timeout);
-			if (notifyTimer) clearTimeout(notifyTimer);
 			unsub();
 			signal?.removeEventListener("abort", killSession);
 			ctx.ui.setStatus(AUDITOR_STATUS_KEY, "");
 		}
 
 		if (timedOut) {
-			return { approved: false, output: parts.join("").trim(), error: `auditor timed out after ${Math.round(AUDITOR_TIMEOUT_MS / 60000)} minutes` };
+			return { approved: false, output: auditText(), error: `auditor timed out after ${Math.round(AUDITOR_TIMEOUT_MS / 60000)} minutes` };
 		}
 		if (overflowError) {
-			return { approved: false, output: parts.join("").trim(), error: `context overflow: ${overflowError}` };
+			return { approved: false, output: auditText(), error: `context overflow: ${overflowError}` };
 		}
-		const output = parts.join("").trim();
-		const approved = /<approved\s*\/>/.test(output);
-		const disapproved = /<disapproved\s*\/>/.test(output);
+		const output = auditText();
+		// Prefer the assistant text for the verdict; fall back to thinking when
+		// a model put the verdict there instead of in its report.
+		const verdictText = /<(?:approved|disapproved)\s*\/>/.test(reportText()) ? reportText() : reasoning.join("").trim();
+		const approved = /<approved\s*\/>/.test(verdictText);
+		const disapproved = /<disapproved\s*\/>/.test(verdictText);
 		// A missing verdict is a failure of the audit, not a rejection of the goal.
 		// Treating it as a rejection silently blocked completion forever.
 		if (!approved && !disapproved) {
@@ -268,12 +319,11 @@ async function runAuditor(ctx: ExtensionContext, state: GoalState, claim: string
 		}
 		return { approved: approved && !disapproved, output };
 	} catch (err) {
-		if (notifyTimer) clearTimeout(notifyTimer);
 		ctx.ui.setStatus(AUDITOR_STATUS_KEY, "");
 		if (timedOut) {
-			return { approved: false, output: parts.join("").trim(), error: `auditor timed out after ${Math.round(AUDITOR_TIMEOUT_MS / 60000)} minutes` };
+			return { approved: false, output: auditText(), error: `auditor timed out after ${Math.round(AUDITOR_TIMEOUT_MS / 60000)} minutes` };
 		}
-		return { approved: false, output: parts.join("").trim(), error: err instanceof Error ? err.message : String(err) };
+		return { approved: false, output: auditText(), error: err instanceof Error ? err.message : String(err) };
 	}
 }
 
@@ -328,7 +378,7 @@ export default function piGoalAudit(pi: ExtensionAPI) {
 			completionSummary: Type.Optional(Type.String({ description: "Summary of what was completed and evidence supporting the claim; the blocker reason when status is 'blocked'." })),
 		}),
 		executionMode: "sequential",
-		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			const effectiveStatus = params.status ?? "complete";
 			if (effectiveStatus !== "complete" && effectiveStatus !== "blocked") {
 				return { content: [{ type: "text", text: 'update_goal only accepts status="complete" or status="blocked".' }], isError: true };
@@ -358,7 +408,10 @@ export default function piGoalAudit(pi: ExtensionAPI) {
 			}
 
 			// ── Audit phase ────────────────────────────────────────────────
-			ctx.ui.notify("Auditor: inspecting workspace for completion evidence...", "info");
+			// Progress travels as this tool's partial result, so both the TUI and
+			// RPC clients update the single update_goal row in place.
+			const progress = (text: string) =>
+				onUpdate?.({ content: [{ type: "text", text }], details: { goal } });
 
 			const abortController = new AbortController();
 			let unsubTerminal: (() => void) | null = null;
@@ -381,7 +434,7 @@ export default function piGoalAudit(pi: ExtensionAPI) {
 
 			let auditorResult: { approved: boolean; output: string; error?: string };
 			try {
-				auditorResult = await runAuditor(ctx, goal, completionSummary, pi.getThinkingLevel(), abortController.signal);
+				auditorResult = await runAuditor(ctx, goal, completionSummary, pi.getThinkingLevel(), abortController.signal, progress);
 			} finally {
 				signal?.removeEventListener("abort", onRunAbort);
 				unsubTerminal?.();
@@ -480,6 +533,28 @@ export default function piGoalAudit(pi: ExtensionAPI) {
 				}],
 				details: { goal: next },
 			};
+		},
+
+		// Keep the audit report discoverable in the TUI: a live tail while the
+		// auditor runs, and a one-line verdict with an expand hint afterwards.
+		// RPC clients ignore renderers and read the result content instead.
+		renderResult(result, options, theme) {
+			const text = (result.content ?? [])
+				.filter((c) => c.type === "text")
+				.map((c) => (c as { type: "text"; text: string }).text)
+				.join("\n");
+			const lines = text.split("\n");
+			if (options.isPartial) {
+				return new Text(lines.map((line) => theme.fg("toolOutput", line)).join("\n"), 0, 0);
+			}
+			if (!options.expanded) {
+				const hint = keyHint("app.tools.expand", "to expand");
+				return new Text(
+					`${theme.fg("muted", lines[0] ?? "")} ${theme.fg("dim", `· ${lines.length} lines · ${hint}`)}`,
+					0, 0,
+				);
+			}
+			return new Text(text, 0, 0);
 		},
 	}));
 
