@@ -137,7 +137,9 @@ function makeAuditorLoader(): ResourceLoader {
 			"<approved/>",
 			"<disapproved/>",
 		].join("\n"),
+		getSystemPromptSource: () => undefined,
 		getAppendSystemPrompt: () => [],
+		getAppendSystemPromptSources: () => [],
 		extendResources: () => {},
 		reload: async () => {},
 	};
@@ -381,13 +383,13 @@ export default function piGoalAudit(pi: ExtensionAPI) {
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			const effectiveStatus = params.status ?? "complete";
 			if (effectiveStatus !== "complete" && effectiveStatus !== "blocked") {
-				return { content: [{ type: "text", text: 'update_goal only accepts status="complete" or status="blocked".' }], isError: true };
+				return { content: [{ type: "text", text: 'update_goal only accepts status="complete" or status="blocked".' }], details: { goal }, isError: true };
 			}
 			if (!goal) {
-				return { content: [{ type: "text", text: "No goal is set." }], isError: true };
+				return { content: [{ type: "text", text: "No goal is set." }], details: { goal }, isError: true };
 			}
 			if (goal.status !== "active") {
-				return { content: [{ type: "text", text: `Goal is ${goal.status}; update_goal does not apply.` }], isError: true };
+				return { content: [{ type: "text", text: `Goal is ${goal.status}; update_goal does not apply.` }], details: { goal }, isError: true };
 			}
 
 			const completionSummary = params.completionSummary?.trim() ?? "";
@@ -395,7 +397,7 @@ export default function piGoalAudit(pi: ExtensionAPI) {
 			// ── Blocked: the agent explicitly gives up instead of looping ─────
 			if (effectiveStatus === "blocked") {
 				if (!completionSummary) {
-					return { content: [{ type: "text", text: 'status="blocked" requires a completionSummary explaining the blocker.' }], isError: true };
+					return { content: [{ type: "text", text: 'status="blocked" requires a completionSummary explaining the blocker.' }], details: { goal }, isError: true };
 				}
 				const next: GoalState = { ...goal, status: "paused", updatedAt: Date.now() };
 				persist(pi, ctx, next);
