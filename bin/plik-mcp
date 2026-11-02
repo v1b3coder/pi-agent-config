@@ -3,7 +3,7 @@
 # so the API token lives in .env.local instead of a second config file.
 set -euo pipefail
 
-# `pi mcp list` does not load extensions, so fall back to reading .env.local.
+# Fall back to .env.local when run outside pi, where nothing injects the values.
 if [[ -z "${PLIK_URL:-}" && -r "$HOME/.pi/agent/.env.local" ]]; then
   PLIK_URL="$(sed -n 's/^PLIK_URL=//p' "$HOME/.pi/agent/.env.local" | tail -n1)"
   PLIK_TOKEN="$(sed -n 's/^PLIK_TOKEN=//p' "$HOME/.pi/agent/.env.local" | tail -n1)"
