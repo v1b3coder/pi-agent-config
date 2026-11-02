@@ -45,8 +45,14 @@ Edit `.env.local`:
 | `TAVILY_API_KEY` | API key for [Tavily](https://tavily.com) web search | Optional — needed for web search skills |
 | `PI_EXT_NTFY_ENABLED` | Set to `1` to enable mobile push notifications via [ntfy](https://ntfy.sh) | Optional |
 | `PI_EXT_NTFY_TOPIC` | ntfy topic name (any unique string) | Required if ntfy is enabled |
+| `PLIK_URL` | Base URL of your [Plik](https://github.com/root-gg/plik) instance | Required for the `plik` MCP server |
+| `PLIK_TOKEN` | Plik API token (create one in the Plik web UI) | Required if your instance enforces authentication |
 
 Treat `.env.local` as sensitive — it's already in `.gitignore`.
+
+### 3b. MCP servers
+
+`mcp.json` configures MCP servers. The `plik` entry runs `bin/plik-mcp`, a wrapper that generates a throwaway plikrc from `PLIK_URL`/`PLIK_TOKEN` and starts `plik --mcp`, so the API token stays in `.env.local` instead of a second config file. Its tools are exposed through codemode; `pi mcp list` shows the connection.
 
 ### 4. Install npm package dependencies
 
@@ -253,7 +259,7 @@ Configured in `modes.json` — all use **DeepSeek V4 Flash** via LiteLLM with di
 ├── modes.json            # Mode definitions (rush/smart/deep)
 ├── models.json           # Per-provider model overrides (thinking maps, compat)
 ├── litellm-models.json   # Cached LiteLLM model catalog
-├── mcp.json              # MCP server config (empty, ready for use)
+├── mcp.json              # MCP server config (plik, notion)
 ├── .env                  # Template — copy to .env.local
 ├── .env.local            # Local secrets (gitignored)
 ├── npm/                  # Pi packages (package.json + node_modules)

@@ -3,6 +3,11 @@
     "notion": {
       "url": "https://mcp.notion.com/mcp",
       "enabled": false
+    },
+    "plik": {
+      "command": "/home/dev/.pi/agent/bin/plik-mcp",
+      "exposure": "codemode",
+      "description": "Upload files and text snippets to Plik (share.slush.cz) and inspect its server capabilities"
     }
   }
 }
