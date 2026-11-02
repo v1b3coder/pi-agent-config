@@ -52,7 +52,7 @@ Treat `.env.local` as sensitive — it's already in `.gitignore`.
 
 ### 3b. MCP servers
 
-`mcp.json` configures MCP servers. The `plik` entry runs `bin/plik-mcp`, a wrapper that generates a throwaway plikrc from `PLIK_URL`/`PLIK_TOKEN` and starts `plik --mcp`, so the API token stays in `.env.local` instead of a second config file. Its tools are exposed through codemode; `pi mcp list` shows the connection.
+`mcp.json` configures MCP servers. The `plik` entry runs `bin/plik-mcp`, a wrapper that generates a throwaway plikrc from `PLIK_URL`/`PLIK_TOKEN` and starts `plik --mcp`, so the API token stays in `.env.local` instead of a second config file. Its tools are exposed through codemode; `pi mcp list` shows the connection. Without both values the wrapper exits before the MCP handshake, so the Plik server stays unconfigured.
 
 ### 4. Install npm package dependencies
 

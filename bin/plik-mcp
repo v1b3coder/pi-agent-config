@@ -9,7 +9,11 @@ if [[ -z "${PLIK_URL:-}" && -r "$HOME/.pi/agent/.env.local" ]]; then
   PLIK_TOKEN="$(sed -n 's/^PLIK_TOKEN=//p' "$HOME/.pi/agent/.env.local" | tail -n1)"
 fi
 
-: "${PLIK_URL:?PLIK_URL is not set (add it to ~/.pi/agent/.env.local)}"
+# Unconfigured means no Plik MCP server: exit before the MCP handshake.
+if [[ -z "${PLIK_URL:-}" || -z "${PLIK_TOKEN:-}" ]]; then
+  exit 0
+fi
+
 plik="$(command -v plik)" || { echo "plik CLI not found in PATH" >&2; exit 1; }
 
 runtime_dir="${XDG_RUNTIME_DIR:-/tmp}/plik-mcp-$(id -u)"
