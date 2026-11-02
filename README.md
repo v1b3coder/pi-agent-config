@@ -52,7 +52,7 @@ Treat `.env.local` as sensitive — it's already in `.gitignore`.
 
 ### 3b. MCP servers
 
-`mcp.json` configures MCP servers. The `plik` server is registered by `extensions/plik-mcp.ts` only when `PLIK_URL` and `PLIK_TOKEN` are set, so Pi never spawns or reports it while unconfigured. Its command is `bin/plik-mcp`, a wrapper that generates a throwaway plikrc from those values and starts `plik --mcp`, so the API token stays in `.env.local` instead of a second config file. Its tools are exposed through codemode.
+`mcp.json` configures MCP servers. `extensions/plik.ts` registers two native tools, `share_file` and `share_text`, that call the Plik REST API directly (`POST /upload`, then `POST /file/...`), so no Plik CLI or MCP server is needed. `PLIK_URL` and `PLIK_TOKEN` are read at call time; the token stays in `.env.local`.
 
 ### 4. Install npm package dependencies
 
@@ -274,7 +274,7 @@ Configured in `modes.json` — all use **DeepSeek V4 Flash** via LiteLLM with di
 │   ├── pi-footer.json             # Footer widget layout config
 │   ├── pi-goal-audit.ts           # Goal mode with independent auditor
 │   ├── pi-goal-audit-helpers.ts   # Goal audit helper functions
-│   ├── plik-mcp.ts                # Registers the Plik MCP server when configured
+│   ├── plik.ts                    # share_file / share_text through the Plik API
 │   ├── preset.ts                  # Switchable tool/skill presets
 │   ├── prompt-history.ts          # Persisted prompt history across sessions
 │   ├── subagent.ts                # Isolated child session delegation
@@ -293,6 +293,6 @@ Configured in `modes.json` — all use **DeepSeek V4 Flash** via LiteLLM with di
 ├── themes/                # Custom TUI themes
 │   └── dark-strip.json    # Dark theme for left-strip tools
 ├── sessions/              # Session logs
-├── bin/                   # Pi-managed binaries (pi, rg, fd) + plik-mcp wrapper
+├── bin/                   # Pi-managed binaries (pi, rg, fd)
 └── keybindings.json       # Custom keybindings (Shift+Enter newline)
 ```
