@@ -5,6 +5,9 @@
  *   - `share_file` — upload a local file by absolute path
  *   - `share_text` — upload inline text as a named file
  *
+ * Both require a `comments` description of the content. Optional `ttl`,
+ * `one_shot`, and `removable` default to the server's behavior.
+ *
  * Each share creates an upload with one file reference, then uploads the file:
  *   POST /upload                          { files: [{ fileName, fileSize, reference }] }
  *   POST /file/{uploadID}/{fileID}/{name}   multipart field "file"
@@ -24,7 +27,7 @@ type UploadParams = {
 	ttl?: number;
 	one_shot?: boolean;
 	removable?: boolean;
-	comments?: string;
+	comments: string;
 };
 
 type PlikFile = { id: string; fileName: string };
@@ -49,9 +52,10 @@ const uploadParams = {
 	removable: Type.Optional(
 		Type.Boolean({ description: "Allow anyone to delete the upload" }),
 	),
-	comments: Type.Optional(
-		Type.String({ description: "Markdown comment attached to the upload" }),
-	),
+	comments: Type.String({
+		minLength: 1,
+		description: "Markdown comment describing what the shared content is",
+	}),
 };
 
 function config(): { base: string; token: string } {
@@ -92,7 +96,7 @@ async function share(
 			ttl: params.ttl ?? 0,
 			oneShot: params.one_shot ?? false,
 			removable: params.removable ?? false,
-			comments: params.comments ?? "",
+			comments: params.comments,
 			files: [{ fileName, fileSize: size, reference: "0" }],
 		}),
 		signal,
@@ -134,6 +138,9 @@ export default function plikExtension(pi: ExtensionAPI) {
 		description:
 			"Upload a local file to the user's Plik instance and return the upload page and direct download URLs.",
 		promptSnippet: "Share a local file through Plik",
+		promptGuidelines: [
+			"Write a short comment describing what the file is.",
+		],
 		parameters: Type.Object({
 			path: Type.String({ description: "Absolute path of the file to share" }),
 			...uploadParams,
@@ -160,6 +167,9 @@ export default function plikExtension(pi: ExtensionAPI) {
 		description:
 			"Upload inline text as a named file to the user's Plik instance and return the upload page and direct download URLs.",
 		promptSnippet: "Share text through Plik",
+		promptGuidelines: [
+			"Write a short comment describing what the content is.",
+		],
 		parameters: Type.Object({
 			filename: Type.String({ description: "Name for the uploaded file (e.g. snippet.go)" }),
 			content: Type.String({ description: "Text content to upload" }),
