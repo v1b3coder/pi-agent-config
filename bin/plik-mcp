@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Runs the Plik MCP server with a plikrc generated from PLIK_URL/PLIK_TOKEN,
+# so the API token lives in .env.local instead of a second config file.
+set -euo pipefail
+
+# `pi mcp list` does not load extensions, so fall back to reading .env.local.
+if [[ -z "${PLIK_URL:-}" && -r "$HOME/.pi/agent/.env.local" ]]; then
+  PLIK_URL="$(sed -n 's/^PLIK_URL=//p' "$HOME/.pi/agent/.env.local" | tail -n1)"
+  PLIK_TOKEN="$(sed -n 's/^PLIK_TOKEN=//p' "$HOME/.pi/agent/.env.local" | tail -n1)"
+fi
+
+: "${PLIK_URL:?PLIK_URL is not set (add it to ~/.pi/agent/.env.local)}"
+plik="$(command -v plik)" || { echo "plik CLI not found in PATH" >&2; exit 1; }
+
+runtime_dir="${XDG_RUNTIME_DIR:-/tmp}/plik-mcp-$(id -u)"
+install -d -m 700 "$runtime_dir"
+umask 077
+printf 'URL = "%s"\nToken = "%s"\nAutoUpdate = false\n' \
+  "${PLIK_URL%/}" "${PLIK_TOKEN:-}" >"$runtime_dir/plikrc"
+
+PLIKRC="$runtime_dir/plikrc" exec "$plik" --mcp "$@"

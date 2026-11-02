@@ -292,6 +292,6 @@ Configured in `modes.json` — all use **DeepSeek V4 Flash** via LiteLLM with di
 ├── themes/                # Custom TUI themes
 │   └── dark-strip.json    # Dark theme for left-strip tools
 ├── sessions/              # Session logs
-├── bin/                   # Helper binaries (rg, fd)
+├── bin/                   # Pi-managed binaries (pi, rg, fd) + plik-mcp wrapper
 └── keybindings.json       # Custom keybindings (Shift+Enter newline)
 ```
