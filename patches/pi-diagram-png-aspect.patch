@@ -1,0 +1,32 @@
+Reference patch for @mcuste/pi-diagram 0.6.3: PNG rasterization failed on diagrams taller
+than roughly 2:1, because parseTargetDimensions floored both sides independently while resvg
+fits one side exactly and rounds the other, so parseRenderedPng rejected a correct image.
+
+Applies to upstream source (git apply -p1 from the repo root):
+
+    git clone https://github.com/mcuste/pi-diagram && cd pi-diagram
+    git apply /home/dev/.pi/agent/patches/pi-diagram-png-aspect.patch
+
+The installed copy is a bundled ESM file, so the same change was made by hand in
+npm/node_modules/@mcuste/pi-diagram/dist/extension.js (replace the trailing
+`return { widthPx, heightPx };` of parseTargetDimensions). npm/ is gitignored here, so this
+patch file is the only record: reapply or drop it after `pi install`/upgrade of the package,
+and drop it for good once upstream ships the fix.
+
+--- a/packages/d2/src/raster.ts
++++ b/packages/d2/src/raster.ts
+@@ -90,7 +90,13 @@ export function parseTargetDimensions(
+       `The SVG aspect ratio cannot fit within ${MAX_WIDTH_PX} by ${MAX_HEIGHT_PX} pixels.`,
+     );
+   }
+-  return { widthPx, heightPx };
++  // resvg fits the named side exactly and rounds the other one, so the expected size has to come
++  // from that same side. Flooring both independently drops a pixel at the exact-fit scale, and
++  // parseRenderedPng then rejects a correct image for missing its own aspect ratio.
++  const fittedByHeight = heightPx === MAX_HEIGHT_PX && widthPx < MAX_WIDTH_PX;
++  return fittedByHeight
++    ? { widthPx: Math.round(naturalWidthPx * (heightPx / naturalHeightPx)), heightPx }
++    : { widthPx, heightPx: Math.round(naturalHeightPx * (widthPx / naturalWidthPx)) };
+ }
+ 
+ /** The store holds text, so an image travels as base64 behind the sizes it was drawn at. */
