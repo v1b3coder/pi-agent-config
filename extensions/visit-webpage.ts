@@ -305,13 +305,13 @@ export default function (pi: ExtensionAPI) {
 			),
 		}),
 		renderCall(args, _theme, context) {
-			const text: Text = context.lastComponent ?? new Text("", 0, 0);
+			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
 			text.setText(`visit_webpage: ${truncateToWidth(args.url ?? "", 100)}${args.format && args.format !== "md" ? ` [${args.format}]` : ""}${args.css_selector ? ` {${truncateToWidth(args.css_selector, 40)}}` : ""}`);
 			return text;
 		},
 
 		renderResult(
-			result: { content: { type: string; text?: string }[]; details: unknown },
+			result: { content: { type: string; text?: string }[]; details: unknown; isError?: boolean },
 			options: { expanded: boolean; isPartial: boolean },
 			_theme: any,
 			context: any,
@@ -356,6 +356,7 @@ export default function (pi: ExtensionAPI) {
 				return {
 					content: [{ type: "text", text: `Error: URL must start with http:// or https://\n\nGot: ${url}` }],
 					isError: true,
+					details: { url },
 				};
 			}
 
@@ -366,6 +367,7 @@ export default function (pi: ExtensionAPI) {
 				return {
 					content: [{ type: "text", text: "Error: css_selector cannot be combined with format 'png' (only the viewport is captured)." }],
 					isError: true,
+					details: { url },
 				};
 			}
 
@@ -379,11 +381,13 @@ export default function (pi: ExtensionAPI) {
 						},
 					],
 					isError: true,
+					details: { url },
 				};
 			}
 
 			onUpdate?.({
 				content: [{ type: "text", text: `🌐 Fetching ${url}...` }],
+				details: {},
 			});
 
 			try {
@@ -429,6 +433,7 @@ export default function (pi: ExtensionAPI) {
 				return {
 					content: [{ type: "text", text: `Error fetching ${url}: ${message}` }],
 					isError: true,
+					details: { url },
 				};
 			}
 		},

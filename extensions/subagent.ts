@@ -10,10 +10,32 @@ import {
   ToolExecutionComponent,
 } from "@earendil-works/pi-coding-agent";
 import { keyHint } from "@earendil-works/pi-coding-agent";
-import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, Theme, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { isContextOverflow } from "@earendil-works/pi-ai/compat";
 import { Type } from "typebox";
 import { join } from "node:path";
+import webSearchExtension from "./web-search.ts";
+import visitWebpageExtension from "./visit-webpage.ts";
+
+// Child sessions run with `noExtensions: true`, so extension-registered tools do
+// not exist there. The web tools are handed to createAgentSession via
+// `customTools` instead. Both factories only call registerTool, so a stub API
+// captures the definition without touching the shared extension runtime.
+function captureTool(factory: (pi: ExtensionAPI) => void): ToolDefinition<any, any, any> {
+  let captured: ToolDefinition<any, any, any> | undefined;
+  factory({
+    registerTool: (definition: ToolDefinition<any, any, any>) => {
+      captured = definition;
+    },
+  } as unknown as ExtensionAPI);
+  if (!captured) throw new Error("extension factory registered no tool");
+  return captured;
+}
+
+const INHERITED_TOOLS: Record<string, ToolDefinition<any, any, any>> = {
+  web_search: captureTool(webSearchExtension),
+  visit_webpage: captureTool(visitWebpageExtension),
+};
 
 // ── Shared types ───────────────────────────────────────────────────
 
@@ -589,7 +611,7 @@ async function spawnChild(
     // Extensions are NOT loaded into the child. Extension factories hold
     // module-level state and register on a shared runtime, so binding the full set
     // inside a second in-process session corrupts the PARENT session's extensions.
-    // Only the built-in tools are needed for subagent work.
+    // Web tools the agent declares are passed explicitly via `customTools` below.
     const resourceLoader = new DefaultResourceLoader({
       cwd: ctx.cwd,
       agentDir,
@@ -626,6 +648,7 @@ async function spawnChild(
       model: ctx.model,
       thinkingLevel,
       tools: def.tools,
+      customTools: def.tools.flatMap((name) => (INHERITED_TOOLS[name] ? [INHERITED_TOOLS[name]!] : [])),
       modelRuntime,
       resourceLoader,
       sessionManager: SessionManager.inMemory(ctx.cwd),
