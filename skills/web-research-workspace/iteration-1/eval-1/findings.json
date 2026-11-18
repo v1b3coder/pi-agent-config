@@ -1,0 +1,131 @@
+{
+  "question": "PyInstaller vs Nuitka vs shiv/pex pro distribuci Python CLI na Linux/macOS/Windows (rychlý build, žádné platform-specific ladění)",
+  "generated_at": "2026-11-18T21:10:00Z",
+  "rounds": 3,
+  "recommendation": "PyInstaller onedir + CI matrix; pex pro interní nástroje s vlastním Pythonem; Nuitka jen s měřenou potřebou",
+  "findings": [
+    {
+      "id": "F1",
+      "claim": "Žádný z nástrojů neumí cross-compile; tři CI runnery jsou nevyhnutelné.",
+      "topic": "cross-compile",
+      "confidence": "high",
+      "evidence": "PyInstaller docs: output specific to the active OS and Python version. Nuitka: Windows build targets Windows. pex --platform jen pro wheels, scie je nativní per OS/arch.",
+      "sources": [
+        { "title": "PyInstaller operating mode", "url": "https://pyinstaller.org/en/stable/operating-mode.html", "published": null },
+        { "title": "pex scies", "url": "https://docs.pex-tool.org/scie.html", "published": null }
+      ],
+      "contested_by": []
+    },
+    {
+      "id": "F2",
+      "claim": "PyInstaller onefile extrahuje do _MEIxxxx při každém startu, bez cache; force-kill leakuje adresáře a /tmp noexec onefile rozbije.",
+      "topic": "pyinstaller",
+      "confidence": "high",
+      "evidence": "operating-mode.html: bootloader uncompresses into _MEIxxxx, deletes on exit. feature-notes.html: two-process model, temp cleanup. noexec /tmp incompatible with onefile.",
+      "sources": [
+        { "title": "PyInstaller operating mode", "url": "https://pyinstaller.org/en/stable/operating-mode.html", "published": null },
+        { "title": "PyInstaller feature notes", "url": "https://pyinstaller.org/en/stable/feature-notes.html", "published": null }
+      ],
+      "contested_by": []
+    },
+    {
+      "id": "F3",
+      "claim": "Nuitka build je 5–17× pomalejší než PyInstaller; ccache v cold CI nepomáhá.",
+      "topic": "benchmarky",
+      "confidence": "high",
+      "evidence": "5,4× (runcell, 16-core, ccache off) a 17,2× (větší dep tree); onefile 2,5–7,7×; cross-machine ccache 0 % do 4.4 (10/2026); warm rebuild 386→202 s.",
+      "sources": [
+        { "title": "runcell benchmark", "url": "https://runcell.dev/blog/pyinstaller-vs-nuitka-benchmark", "published": null },
+        { "title": "Nuitka release notes", "url": "https://github.com/Nuitka/Nuitka", "published": null }
+      ],
+      "contested_by": ["F4"]
+    },
+    {
+      "id": "F4",
+      "claim": "Srovnání 18,5 s vs 0,24 s je neplatné: jde o onefile vs folder. Ve stejných režimech je start Nuitky a PyInstalleru šum, s výjimkou matplotlib hooku (+8 s) u PyInstalleru.",
+      "topic": "startup",
+      "confidence": "high",
+      "evidence": "Tabulky benchmarku: folder 0,02–0,27 s (Nuitka) vs 0,03–0,21 s (PyInstaller); 18,5 s patří onefile režimu.",
+      "sources": [
+        { "title": "runcell benchmark", "url": "https://runcell.dev/blog/pyinstaller-vs-nuitka-benchmark", "published": null }
+      ],
+      "contested_by": []
+    },
+    {
+      "id": "F5",
+      "claim": "Nuitka je od 2026 pod AGPLv3 s Runtime Library Exception, která výslovně dovoluje proprietární výstup; komerční tarif (250 €/rok) je hardening, ne právo distribuovat.",
+      "topic": "licence",
+      "confidence": "high",
+      "evidence": "LICENSE-RUNTIME.txt: exception 'allow the compilation of non-AGPL (including proprietary) Python programs ... without the requirement that the resulting executable ... be licensed under the AGPLv3'. doc/commercial.html: paid = obfuskace, traceback encryption, legacy Windows.",
+      "sources": [
+        { "title": "Nuitka LICENSE-RUNTIME.txt", "url": "https://raw.githubusercontent.com/Nuitka/Nuitka/develop/LICENSE-RUNTIME.txt", "published": null },
+        { "title": "Nuitka commercial", "url": "https://nuitka.net/doc/commercial.html", "published": null }
+      ],
+      "contested_by": []
+    },
+    {
+      "id": "F6",
+      "claim": "Podepisování stojí ~220 USD/rok a 2–4 dny napoprvé; macOS trust lze obejít volbou distribučního kanálu, Windows SmartScreen ne.",
+      "topic": "podepisování",
+      "confidence": "medium",
+      "evidence": "Apple 99 USD/rok; Azure Artifact Signing ~120 USD/rok (nebo OV 150–300, OSS zdarma SignPath). Gatekeeper řeší jen quarantined kód; SmartScreen reputace se váže na .exe.",
+      "sources": [
+        { "title": "Apple Developer Program", "url": "https://developer.apple.com/programs/enroll", "published": null },
+        { "title": "Microsoft Artifact Signing", "url": "https://learn.microsoft.com", "published": "2026-11-10" }
+      ],
+      "contested_by": []
+    },
+    {
+      "id": "F7",
+      "claim": "shiv je v údržbovém režimu (poslední release 11/2024), pex je extrémně aktivní (~50 vydání za 2026).",
+      "topic": "údržba",
+      "confidence": "high",
+      "evidence": "shiv 1.0.8 (11/2024), dva commity 2024–2026, otevřené PR z 2021–2024. pex 2.107.1 (11/2026), provenance attestations.",
+      "sources": [
+        { "title": "shiv repo", "url": "https://github.com/linkedin/shiv", "published": null },
+        { "title": "pex release history", "url": "https://pypi.org/project/pex/#history", "published": null }
+      ],
+      "contested_by": []
+    },
+    {
+      "id": "F8",
+      "claim": "pex scie je produkční a dává 31 MB nativní exe se startem 16,3 ms, ale je to jeden soubor na platformu.",
+      "topic": "pex",
+      "confidence": "high",
+      "evidence": "docs.pex-tool.org/scie.html: --scie eager = native executable s interpretrem. Hyperfine: scie 16,3 ms, sh-boot 17,6 ms, plain pex 99,2 ms.",
+      "sources": [
+        { "title": "pex scies", "url": "https://docs.pex-tool.org/scie.html", "published": null }
+      ],
+      "contested_by": []
+    },
+    {
+      "id": "F9",
+      "claim": "Nuitka neodstraňuje hidden-import třídu problémů; opakovaná bolest PyInstalleru je churn third-party hooků a per-release AV whitelisting.",
+      "topic": "týmová zkušenost",
+      "confidence": "medium",
+      "evidence": "Migrační case files: hidden imports se u Nuitky přesouvají do compile-time; AV whitelisting je proces na každý release.",
+      "sources": [
+        { "title": "extract_otp_secrets issue 68", "url": "https://github.com/scito/extract_otp_secrets/issues/68", "published": null }
+      ],
+      "contested_by": []
+    }
+  ],
+  "open_questions": [
+    "Reálný build time a start pro konkrétní projekt týmu (neměřeno, cizí benchmarky)",
+    "CI wall-clock pro 3-OS matrix",
+    "pex/scie na produkčním dep tree s compiled závislostmi",
+    "Nuitka AV guidance jako placená featura — v veřejných zdrojích nenalezeno",
+    "Homebrew cask signing od 2026-09-01 — jediný zdroj, neověřeno oficiálně"
+  ],
+  "artifacts": [
+    ".pi/research/py-cli-packaging/plan.md",
+    ".pi/research/py-cli-packaging/iter-1-pyinstaller.md",
+    ".pi/research/py-cli-packaging/iter-1-nuitka.md",
+    ".pi/research/py-cli-packaging/iter-1-shiv-pex.md",
+    ".pi/research/py-cli-packaging/iter-2-nuitka-licence.md",
+    ".pi/research/py-cli-packaging/iter-2-signing.md",
+    ".pi/research/py-cli-packaging/iter-2-benchmarks.md",
+    ".pi/research/py-cli-packaging/iter-3-pex-scie.md",
+    ".pi/research/py-cli-packaging/iter-3-team-experience.md"
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "skill_name": "web-research",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Máme Python CLI, které potřebujeme distribuovat jako binárku na Linux, macOS a Windows. Porovnej PyInstaller, Nuitka a shiv/pex a doporuč, co použít pro tým, který chce rychlé buildy a nemá čas ladit platform-specific problémy.",
+      "expected_output": "Rozhodnutelná odpověď s explicitními kompromisy (velikost, build time, start-up, cross-platform limity), citacemi na primární zdroje (oficiální docs/changelog) a sekcí o tom, co zůstalo neověřené. Artefakty v .pi/research/<slug>/report.md a findings.json.",
+      "files": [],
+      "expectations": [
+        "Report obsahuje doporučení a alespoň dvě čísla nebo konkrétní omezení z primárních zdrojů",
+        "Každý claim má URL a datum publikace",
+        "Existuje sekce s nevyřešenými mezerami",
+        "findings.json parsuje a má unikátní id u každého findu",
+        "Hlavní vlákno neobsahuje víc než ~12 řádků shrnutí (report je v souboru)"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Zjišťujeme, jestli má smysl přejít z gRPC na Connect RPC pro interní služby v Go a TypeScriptu. Jaká je dnes situace v ekosystému a co by nás to stálo?",
+      "expected_output": "Syntéza stavu ekosystému (zralost, tooling, browser podpora, migrační cesta) s rozlišením ověřených faktů a domněnek, včetně contra-argumentů pro setrvání u gRPC.",
+      "files": [],
+      "expectations": [
+        "Odpověď obsahuje alespoň jeden contra-argument, ne jen pozitiva",
+        "Názory komunitních zdrojů jsou oddělené od faktů z oficiální dokumentace",
+        "Report cituje primární dokumentaci obou technologií"
+      ]
+    }
+  ]
+}
