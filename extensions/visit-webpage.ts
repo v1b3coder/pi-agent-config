@@ -72,9 +72,71 @@ async function downloadImage(url: string): Promise<string> {
 	return filePath;
 }
 
-async function fetchWebpage(url: string, signal?: AbortSignal): Promise<string> {
-	const jinaUrl = `https://r.jina.ai/${url}`;
-	const headers = getHeaders(true);
+type Crawl4aiConfig = { endpoint: string; token: string };
+
+/** Crawl4AI is used when both CRAWL4AI_URL and CRAWL4AI_API_TOKEN are set. */
+function getCrawl4aiConfig(): Crawl4aiConfig | null {
+	const base = process.env["CRAWL4AI_URL"]?.trim();
+	const token = process.env["CRAWL4AI_API_TOKEN"]?.trim();
+	if (!base || !token) return null;
+	return { endpoint: `${base.replace(/\/+$/, "")}/md`, token };
+}
+
+class FetchError extends Error {
+	retryable: boolean;
+
+	constructor(message: string, retryable: boolean) {
+		super(message);
+		this.retryable = retryable;
+	}
+}
+
+async function fetchViaCrawl4ai(config: Crawl4aiConfig, url: string, signal?: AbortSignal): Promise<string> {
+	const response = await fetch(config.endpoint, {
+		method: "POST",
+		headers: {
+			...getHeaders(),
+			Authorization: `Bearer ${config.token}`,
+			"Content-Type": "application/json",
+		},
+		body: JSON.stringify({ url, f: "fit" }),
+		signal: signal ?? AbortSignal.timeout(TIMEOUT),
+	});
+
+	if (!response.ok) {
+		const detail = await response.text().catch(() => "");
+		throw new FetchError(
+			`Crawl4AI HTTP ${response.status}${detail ? `: ${truncateToWidth(detail, 300)}` : ""}`,
+			response.status === 451 || response.status >= 500,
+		);
+	}
+
+	const parsed = (await response.json()) as { markdown?: string; success?: boolean; detail?: string };
+	if (parsed.success === false) {
+		throw new FetchError(`Crawl4AI crawl failed: ${parsed.detail ?? "unknown error"}`, true);
+	}
+	if (!parsed.markdown) {
+		throw new FetchError("Crawl4AI returned empty markdown", true);
+	}
+	return parsed.markdown;
+}
+
+async function fetchViaJina(url: string, signal?: AbortSignal): Promise<string> {
+	const response = await fetch(`https://r.jina.ai/${url}`, {
+		headers: getHeaders(true),
+		signal: signal ?? AbortSignal.timeout(TIMEOUT),
+	});
+
+	if (!response.ok) {
+		throw new FetchError(`HTTP ${response.status} ${response.statusText}`, response.status === 451 || response.status >= 500);
+	}
+
+	return response.text();
+}
+
+async function fetchWebpage(url: string, signal?: AbortSignal): Promise<{ markdown: string; via: string }> {
+	const crawl4ai = getCrawl4aiConfig();
+	const via = crawl4ai ? "crawl4ai" : "jina";
 
 	let lastError: Error | null = null;
 
@@ -84,37 +146,24 @@ async function fetchWebpage(url: string, signal?: AbortSignal): Promise<string> 
 		}
 
 		try {
-			const response = await fetch(jinaUrl, {
-				headers,
-				signal: signal ?? AbortSignal.timeout(TIMEOUT),
-			});
-
-			if (!response.ok) {
-				if ((response.status === 451 || response.status >= 500) && i < RETRY_DELAYS.length - 1) {
-					lastError = new Error(`HTTP ${response.status}`);
-					continue;
-				}
-				throw new Error(`HTTP ${response.status} ${response.statusText}`);
-			}
-
-			const text = await response.text();
+			const text = crawl4ai ? await fetchViaCrawl4ai(crawl4ai, url, signal) : await fetchViaJina(url, signal);
 
 			// Clean up multiple line breaks (same as Python re.sub(r"\n{3,}", "\n\n", content))
 			const cleaned = text.replace(/\n{3,}/g, "\n\n");
 
 			// Truncate if too long
 			if (cleaned.length > MAX_CONTENT_LENGTH) {
-				return cleaned.slice(0, MAX_CONTENT_LENGTH) + "\n\n..._Content truncated_...";
+				return { markdown: cleaned.slice(0, MAX_CONTENT_LENGTH) + "\n\n..._Content truncated_...", via };
 			}
 
-			return cleaned;
+			return { markdown: cleaned, via };
 		} catch (err) {
 			if (err instanceof Error && err.name === "AbortError") {
 				throw err;
 			}
 			lastError = err instanceof Error ? err : new Error(String(err));
-			if (i < RETRY_DELAYS.length - 1) {
-				continue;
+			if (err instanceof FetchError && !err.retryable) {
+				break;
 			}
 		}
 	}
@@ -127,9 +176,9 @@ export default function (pi: ExtensionAPI) {
 		name: "visit_webpage",
 		label: "Visit Webpage",
 		description:
-			"Fetch a URL and extract its content as markdown (via Jina Reader), or download images to a temp file. " +
+			"Fetch a URL and extract its content as markdown (via Crawl4AI when CRAWL4AI_URL + CRAWL4AI_API_TOKEN are set, otherwise Jina Reader), or download images to a temp file. " +
 			"Use for reading articles, documentation, or any web page content. " +
-			"Handles both HTML pages (JavaScript-rendered via Jina Reader) and image URLs.",
+			"Handles both HTML pages (JavaScript-rendered) and image URLs.",
 		promptSnippet:
 			"Fetch a webpage and extract content as markdown, or download images. Use this tool when the user asks to open, visit, fetch, or read a URL.",
 		promptGuidelines: [
@@ -153,7 +202,7 @@ export default function (pi: ExtensionAPI) {
 			context: any,
 		): Component {
 			const text: Text = context.lastComponent ?? new Text("", 0, 0);
-			const details = result.details as { url?: string; type?: string; filePath?: string } | undefined;
+			const details = result.details as { url?: string; type?: string; filePath?: string; via?: string } | undefined;
 
 			if (!options.expanded) {
 				// Collapsed mode: show a short summary
@@ -168,7 +217,9 @@ export default function (pi: ExtensionAPI) {
 						.join("\n");
 					// Count non-whitespace chars as content
 					const contentLen = fullText.replace(/\s/g, "").length;
-					text.setText(`— ${contentLen} chars fetched from ${details?.url ?? "URL"}`);
+					text.setText(
+						`— ${contentLen} chars fetched from ${details?.url ?? "URL"}${details?.via ? ` · ${details.via}` : ""}`,
+					);
 				}
 			} else {
 				// Expanded mode: show full content
@@ -214,10 +265,10 @@ export default function (pi: ExtensionAPI) {
 				}
 
 				// Handle webpage
-				const content = await fetchWebpage(url, signal);
+				const { markdown, via } = await fetchWebpage(url, signal);
 				return {
-					content: [{ type: "text", text: `## Content from ${url}\n\n${content}` }],
-					details: { url, type: "html" },
+					content: [{ type: "text", text: `## Content from ${url}\n\n${markdown}` }],
+					details: { url, type: "html", via },
 				};
 			} catch (err) {
 				const message = err instanceof Error ? err.message : String(err);
