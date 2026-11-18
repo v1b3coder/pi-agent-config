@@ -15,14 +15,6 @@
   },
   "packages": [
     {
-      "source": "npm:pi-skill-tavily",
-      "skills": [
-        "skills/tavily-research/SKILL.md",
-        "skills/tavily-search/SKILL.md",
-        "skills/tavily-extract/SKILL.md"
-      ]
-    },
-    {
       "source": "npm:pi-amplike",
       "extensions": [
         "extensions/handoff.ts",

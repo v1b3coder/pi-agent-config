@@ -42,7 +42,7 @@ Edit `.env.local`:
 |---|---|---|
 | `LITELLM_BASE_URL` | Base URL of your LiteLLM proxy | Yes — no LLM access without it |
 | `LITELLM_API_KEY` | API key for the LiteLLM proxy | Yes |
-| `TAVILY_API_KEY` | API key for [Tavily](https://tavily.com) web search | Optional — needed for web search skills |
+| `TAVILY_API_KEY` | API key for [Tavily](https://tavily.com) web search | Optional — needed for the `web_search` tool |
 | `PI_EXT_NTFY_ENABLED` | Set to `1` to enable mobile push notifications via [ntfy](https://ntfy.sh) | Optional |
 | `PI_EXT_NTFY_TOPIC` | ntfy topic name (any unique string) | Required if ntfy is enabled |
 | `PLIK_URL` | Base URL of your [Plik](https://github.com/root-gg/plik) instance | Required for the `plik` MCP server |
@@ -169,7 +169,7 @@ Values the injector wrote itself are recorded by hash in `__PI_ENV_INJECTOR_KEYS
 
 | Extension | Description |
 |---|---|
-| **`web-search.ts`** | Registers a `web_search` tool powered by the [Tavily API](https://tavily.com). Supports time-range filtering, search depth selection (ultra-fast through advanced), and rich result rendering with line-count summaries. Requires `TAVILY_API_KEY`. Also includes a **`web_research`** tool (disabled) for deep Tavily research (30–120s, async delivery). |
+| **`web-search.ts`** | Registers a `web_search` tool powered by the [Tavily API](https://tavily.com). Exposes most of the Search API surface (depth, topic, date windows, domain filters, language/country boost, `chunks_per_source`, LLM answer, exact match), defaults to `advanced` depth, and returns score + publish date with up to 2 KB of content per source. Adds a 30 s timeout, retries 429/434/5xx, and reports credit usage. Requires `TAVILY_API_KEY`. Also contains a **`web_research`** tool (disabled) for deep Tavily research (30–120s, async delivery). |
 | **`visit-webpage.ts`** | Registers a `visit_webpage` tool that fetches URLs via [Jina Reader](https://r.jina.ai) (JavaScript-rendered HTML → markdown) or downloads images to temp files. Supports Jina auth via `JINA_API_KEY`. Handles retries on 5xx/451 errors, content-length limits (5MB for images, 100KB for pages), and 60s timeout. |
 
 ### 🔄 Subagent Delegation
@@ -226,7 +226,6 @@ Values the injector wrote itself are recorded by hash in `__PI_ENV_INJECTOR_KEYS
 | Package | Description |
 |---|---|
 | **`pi-provider-litellm`** | LiteLLM API provider — connects to a private proxy exposing multiple local/cloud models (DeepSeek, Qwen, more). |
-| **`pi-skill-tavily`** | Tavily web search skills (tavily-research, tavily-search, tavily-extract) for the agent. |
 | **`pi-amplike`** | Amplike modes system: `/mode` command, `/handoff`, `/session query`, `btw` footnotes, mode definitions in `modes.json`. |
 | **`pi-footer`** | Customizable footer bar with widgets: cwd, context bar, compaction status, model name, token cost, git branch/diff/remote, preset status, fusion status, perf-speed. Configured in `extensions/pi-footer.json`. |
 | **`pi-mcp-adapter`** | MCP (Model Context Protocol) adapter — connects to external MCP servers defined in `mcp.json`. Ready for use. |

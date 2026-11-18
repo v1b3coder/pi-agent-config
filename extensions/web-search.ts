@@ -71,6 +71,86 @@ function resultBg(isError: boolean, theme: Theme): BgFn {
 	return (s: string) => theme.bg(isError ? "toolErrorBg" : "toolSuccessBg", s);
 }
 
+// Tavily returns ~500 chars per chunk (800 at advanced depth) and 3 chunks per
+// source by default, so anything below ~1.5K chars silently discards retrieval.
+const MAX_SNIPPET_CHARS = 2_000;
+const REQUEST_TIMEOUT_MS = 30_000;
+const MAX_ATTEMPTS = 3;
+// 429 = rate limit, 434 = flex-tier capacity exceeded.
+const RETRYABLE_STATUS = new Set([429, 434, 500, 502, 503, 504]);
+
+type TavilyResult = {
+	title: string;
+	url: string;
+	content?: string;
+	score: number;
+	published_date?: string | null;
+};
+
+type TavilySearchResponse = {
+	query: string;
+	answer?: string;
+	response_time: number;
+	results?: TavilyResult[];
+	usage?: { credits: number };
+	error?: string;
+};
+
+/** Search with a hard timeout, retrying the transient statuses Tavily uses. */
+async function tavilyFetch(
+	apiKey: string,
+	body: Record<string, unknown>,
+	signal?: AbortSignal,
+): Promise<Response> {
+	for (let attempt = 1; ; attempt++) {
+		const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+		const response = await fetch("https://api.tavily.com/search", {
+			method: "POST",
+			headers: {
+				Authorization: `Bearer ${apiKey}`,
+				"Content-Type": "application/json",
+			},
+			body: JSON.stringify(body),
+			signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+		});
+		if (!RETRYABLE_STATUS.has(response.status) || attempt >= MAX_ATTEMPTS) {
+			return response;
+		}
+		await new Promise((resolve) => setTimeout(resolve, 800 * attempt));
+	}
+}
+
+/** Tavily dates are RFC-ish strings; ISO day is what the model can compare. */
+function shortDate(value: string | null | undefined): string | null {
+	if (!value) return null;
+	const parsed = new Date(value);
+	return Number.isNaN(parsed.getTime())
+		? value
+		: parsed.toISOString().slice(0, 10);
+}
+
+function formatSearchResults(
+	query: string,
+	depth: string,
+	parsed: TavilySearchResponse,
+	results: TavilyResult[],
+): string {
+	const header = `## Search Results: "${query}" · ${depth} · ${results.length} result${results.length === 1 ? "" : "s"}`;
+	const answer = parsed.answer ? `**Tavily answer:** ${parsed.answer}\n\n` : "";
+	const body = results.map((r, i) => {
+		const meta = [`score ${(r.score ?? 0).toFixed(2)}`];
+		const published = shortDate(r.published_date);
+		if (published) meta.push(`published ${published}`);
+		const content = r.content ?? "";
+		const snippet =
+			content.length > MAX_SNIPPET_CHARS
+				? `${content.slice(0, MAX_SNIPPET_CHARS)} …(truncated)`
+				: content;
+		return `**[${i + 1}] ${r.title}** · ${meta.join(" · ")}\n    ${r.url}\n    ${snippet}`;
+	});
+	return `${header}\n\n${answer}${body.join("\n\n")}`;
+}
+
 export default function webSearchExtension(pi: ExtensionAPI) {
 	// ─── Quick Search Tool (synchronous) ───────────────────────────────────
 
@@ -78,13 +158,17 @@ export default function webSearchExtension(pi: ExtensionAPI) {
 		name: "web_search",
 		label: "Web Search",
 		description:
-			"Search the web using the Tavily API. Returns relevant results with titles, URLs, relevance scores, and content snippets. Use for finding current information, documentation, news, facts, prices, or any web content.",
+			"Search the web via Tavily. Returns ranked results with relevance score, publish date and up to 2 KB of content per source, plus an optional LLM-written answer. Use for current information, documentation, news, facts, prices.",
 		promptSnippet: "Search the web for current information",
 		promptGuidelines: [
 			"Use web_search when you need current information not available in training data — prices, recent events, docs updates, real-time data.",
-			"Keep queries concise (under 200 chars). Use keywords, not full sentences.",
-			"Set time_range for time-sensitive queries (e.g., 'week', 'day').",
-			"Use search_depth 'ultra-fast' or 'fast' for quick lookups; 'advanced' for thorough research.",
+			"search_depth defaults to 'advanced' (2 credits, best snippets). Use 'basic' or 'fast' when latency matters; 'ultra-fast' only for throwaway lookups.",
+			"Keep queries under 400 characters; keywords beat full sentences. Split multi-part questions into separate searches.",
+			"Set time_range, or start_date/end_date, for anything time-sensitive. Results carry a published date so you can judge recency.",
+			"Use topic 'news' for breaking events and 'finance' for markets; include_domains to pin trusted sources (e.g. ['docs.python.org']), exclude_domains to drop content farms.",
+			"include_answer adds a Tavily-written summary grounded in the results — fine for facts, still verify anything precise against the sources.",
+			"chunks_per_source (1-3) controls snippet length per source: raise it for dense technical docs, lower it to save tokens.",
+			"max_results defaults to 5 (~2.5K tokens). Raise to 10-20 only for broad coverage or comparisons.",
 		],
 
 		renderShell: "self",
@@ -110,8 +194,10 @@ export default function webSearchExtension(pi: ExtensionAPI) {
 			const details = result.details as
 				| {
 						query: string;
-						response_time_sec: number;
-						total_results: number;
+						search_depth?: string;
+						response_time_sec?: number;
+						total_results?: number;
+						credits?: number;
 						results?: Array<{ title: string; url: string; score: number }>;
 				  }
 				| undefined;
@@ -119,12 +205,15 @@ export default function webSearchExtension(pi: ExtensionAPI) {
 			if (!options.expanded && !context.isError) {
 				// Collapsed mode: just the result count (renderCall already shows the query)
 				const count = details?.total_results ?? 0;
+				const credits = details?.credits;
 				const hint = keyHint("app.tools.expand", "to expand");
 				return new LeftStripBlock(
 					[
 						theme.fg(
 							"dim",
-							`└ ${count} result${count !== 1 ? "s" : ""} · ${hint}`,
+							`└ ${count} result${count !== 1 ? "s" : ""}${
+								credits ? ` · ${credits} credit${credits !== 1 ? "s" : ""}` : ""
+							} · ${hint}`,
 						),
 					],
 					() => resultBg(false, theme),
@@ -143,25 +232,109 @@ export default function webSearchExtension(pi: ExtensionAPI) {
 		parameters: Type.Object({
 			query: Type.String({
 				description:
-					"Search query. Keep concise — keywords work better than full sentences. Max 200 chars.",
+					"Search query. Keep concise — keywords work better than full sentences. Max 400 chars.",
 			}),
 			max_results: Type.Optional(
 				Type.Number({
 					default: 5,
-					description: "Number of results to return (1-10). Default 5. Lower = fewer tokens.",
-				}),
-			),
-			time_range: Type.Optional(
-				Type.String({
-					default: null,
-					description: "Time filter: 'day', 'week', 'month', 'year'. Omit for no filter.",
+					minimum: 1,
+					maximum: 20,
+					description: "Number of results to return (1-20). Default 5. Lower = fewer tokens.",
 				}),
 			),
 			search_depth: Type.Optional(
+				Type.Union(
+					[
+						Type.Literal("ultra-fast"),
+						Type.Literal("fast"),
+						Type.Literal("basic"),
+						Type.Literal("advanced"),
+					],
+					{
+						default: "advanced",
+						description:
+							"'advanced' (default, 2 credits, most relevant snippets), 'basic' (1 credit, summary), 'fast' (1 credit, chunks), 'ultra-fast' (1 credit, one summary per source).",
+					},
+				),
+			),
+			topic: Type.Optional(
+				Type.Union(
+					[
+						Type.Literal("general"),
+						Type.Literal("news"),
+						Type.Literal("finance"),
+					],
+					{
+						default: "general",
+						description:
+							"Search category: 'general' (default), 'news' for breaking events, 'finance' for markets.",
+					},
+				),
+			),
+			time_range: Type.Optional(
+				Type.Union(
+					[
+						Type.Literal("day"),
+						Type.Literal("week"),
+						Type.Literal("month"),
+						Type.Literal("year"),
+					],
+					{ description: "Time filter relative to today: 'day', 'week', 'month', 'year'." },
+				),
+			),
+			start_date: Type.Optional(
 				Type.String({
-					default: "basic",
+					description: "Only results published on or after this date, format YYYY-MM-DD.",
+				}),
+			),
+			end_date: Type.Optional(
+				Type.String({
+					description: "Only results published on or before this date, format YYYY-MM-DD.",
+				}),
+			),
+			chunks_per_source: Type.Optional(
+				Type.Number({
+					minimum: 1,
+					maximum: 3,
 					description:
-						"Search depth: 'ultra-fast' (fastest, lowest quality), 'fast', 'basic' (default, good), 'advanced' (slowest, highest quality).",
+						"Snippet chunks per source (1-3). Default 3. Raise for dense docs, lower to save tokens. Ignored at 'ultra-fast'.",
+				}),
+			),
+			include_answer: Type.Optional(
+				Type.Boolean({
+					default: false,
+					description:
+						"Add a short LLM-written answer grounded in the results. Costs no extra credits; useful for factual lookups.",
+				}),
+			),
+			include_domains: Type.Optional(
+				Type.Array(Type.String(), {
+					description:
+						"Restrict results to these domains (max 300), e.g. ['docs.python.org', 'github.com'].",
+				}),
+			),
+			exclude_domains: Type.Optional(
+				Type.Array(Type.String(), {
+					description: "Drop results from these domains (max 150).",
+				}),
+			),
+			language: Type.Optional(
+				Type.String({
+					description:
+					"Boost results in this language (ISO 639-1, e.g. 'cs'). Write the query in the same language.",
+				}),
+			),
+			country: Type.Optional(
+				Type.String({
+					description:
+					"Boost results from this country, lowercase English name (e.g. 'czech republic'). Only with topic 'general'.",
+				}),
+			),
+			exact_match: Type.Optional(
+				Type.Boolean({
+					default: false,
+					description:
+						"Return only results containing the quoted phrases from the query, bypassing synonyms.",
 				}),
 			),
 		}),
@@ -183,45 +356,46 @@ export default function webSearchExtension(pi: ExtensionAPI) {
 				details: {},
 			});
 
+			const depth = params.search_depth ?? "advanced";
+			const maxResults = Math.min(Math.max(params.max_results ?? 5, 1), 20);
+
 			const body: Record<string, unknown> = {
 				query: params.query,
-				max_results: Math.min(params.max_results ?? 5, 10),
-				search_depth: params.search_depth ?? "basic",
+				max_results: maxResults,
+				search_depth: depth,
+				// Neither costs extra credits: we need recency to trust a result,
+				// and credit usage to keep spend visible.
+				include_published_date: true,
+				include_usage: true,
 			};
+			if (params.topic) body.topic = params.topic;
 			if (params.time_range) body.time_range = params.time_range;
+			if (params.start_date) body.start_date = params.start_date;
+			if (params.end_date) body.end_date = params.end_date;
+			if (params.chunks_per_source && depth !== "ultra-fast") {
+				body.chunks_per_source = params.chunks_per_source;
+			}
+			if (params.include_answer) body.include_answer = true;
+			if (params.include_domains?.length) body.include_domains = params.include_domains;
+			if (params.exclude_domains?.length) body.exclude_domains = params.exclude_domains;
+			if (params.language) body.language = params.language;
+			if (params.country) body.country = params.country;
+			if (params.exact_match) body.exact_match = true;
 
-			const response = await fetch("https://api.tavily.com/search", {
-				method: "POST",
-				headers: {
-					Authorization: `Bearer ${apiKey}`,
-					"Content-Type": "application/json",
-				},
-				body: JSON.stringify(body),
-				signal,
-			});
+			const response = await tavilyFetch(apiKey, body, signal);
 
 			if (!response.ok) {
 				const errText = await response.text().catch(() => "");
 				throw new Error(`Tavily API error ${response.status}: ${errText.slice(0, 300)}`);
 			}
 
-			const parsed = (await response.json()) as {
-				query: string;
-				response_time: number;
-				results?: Array<{
-					title: string;
-					url: string;
-					content: string;
-					score: number;
-				}>;
-				error?: string;
-			};
+			const parsed = (await response.json()) as TavilySearchResponse;
 
 			if (parsed.error) {
 				throw new Error(`Search API error: ${parsed.error}`);
 			}
 
-			const results = (parsed.results ?? []).slice(0, params.max_results ?? 5);
+			const results = (parsed.results ?? []).slice(0, maxResults);
 
 			if (results.length === 0) {
 				return {
@@ -235,27 +409,26 @@ export default function webSearchExtension(pi: ExtensionAPI) {
 				};
 			}
 
-			const lines = results.map(
-				(r, i) =>
-					`**[${i + 1}] ${r.title}**\n    ${r.url}\n    ${(r.content ?? "").slice(0, 400)}`,
-			);
-
 			return {
 				content: [
 					{
 						type: "text",
-						text: `## Search Results: "${params.query}"\n\n${lines.join("\n\n")}`,
+						text: formatSearchResults(params.query, depth, parsed, results),
 					},
 				],
 				details: {
 					query: params.query,
+					search_depth: depth,
+					topic: params.topic ?? "general",
 					response_time_sec: parsed.response_time,
-					total_results: parsed.results?.length ?? 0,
+					total_results: results.length,
+					credits: parsed.usage?.credits,
 					results: results.map((r) => ({
 						title: r.title,
 						url: r.url,
 						score: r.score,
-						content: (r.content ?? "").slice(0, 800),
+						published_date: r.published_date,
+						content: (r.content ?? "").slice(0, MAX_SNIPPET_CHARS),
 					})),
 				},
 			};
