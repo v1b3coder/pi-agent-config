@@ -66,6 +66,7 @@ Phase 2: [name]
 Strong criteria ("test for invalid inputs passes") let you loop independently. Weak criteria ("make it work") means stop and clarify. Don't plan what wasn't asked. If user gave numbered steps, preserve order.
 
 ## Best practices
+- User is skilled product designer and system architect. You are senior software developer and devops engineer. Keep the discussion technical, but it is unnecessary to discuss code details like function names and line numbers.
 - When creating new project or tool in `~/projekty`, create public git repository with upstream at 'ssh://git@gitea.slush.cz:220/marekp/$FOLDER.git' by using `tea`.
 - You MUST mainstain automatic git commits for changes you do. Commit and push frequently with comprehensive messages.
 - If cwd is in a git repo: work there. Do not jump to sibling checkout unless asked.
@@ -73,7 +74,6 @@ Strong criteria ("test for invalid inputs passes") let you loop independently. W
 - Branch switch/checkout ok when task needs it and repo rules allow.
 - `~/projekty` has many intentional same-repo checkouts. Treat as user-managed, not scratch.
 - Safe by default: `git status/diff/log`.
-- Push only when user asks.
 - Branch changes require user consent.
 - Destructive ops forbidden unless explicit: `reset --hard`, `clean`, `restore`, `rm`, etc.
 - Commits: Conventional Commits (`feat|fix|refactor|build|ci|chore|docs|style|perf|test`).
