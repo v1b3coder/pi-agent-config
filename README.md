@@ -169,7 +169,7 @@ Values the injector wrote itself are recorded by hash in `__PI_ENV_INJECTOR_KEYS
 
 | Extension | Description |
 |---|---|
-| **`web-search.ts`** | Registers a `web_search` tool powered by the [Tavily API](https://tavily.com). Exposes most of the Search API surface (depth, topic, date windows, domain filters, language/country boost, `chunks_per_source`, LLM answer, exact match), defaults to `advanced` depth, and returns score + publish date with up to 2 KB of content per source. Adds a 30 s timeout, retries 429/434/5xx, and reports credit usage. Requires `TAVILY_API_KEY`. Also contains a **`web_research`** tool (disabled) for deep Tavily research (30–120s, async delivery). |
+| **`web-search.ts`** | Registers a `web_search` tool powered by the [Tavily API](https://tavily.com). Exposes most of the Search API surface (depth, topic, date windows, domain filters, language/country boost, `chunks_per_source`, LLM answer, exact match), defaults to `advanced` depth, and returns score + publish date with up to 2 KB of content per source. Adds a 30 s timeout, retries 429/434/5xx, and reports credit usage. Requires `TAVILY_API_KEY`. Deep research is left to the `researcher` subagent: Tavily's async research API can't deliver results mid-turn (it needs `deliverAs`) and charges ~16 credits per run. |
 | **`visit-webpage.ts`** | Registers a `visit_webpage` tool that fetches URLs via [Jina Reader](https://r.jina.ai) (JavaScript-rendered HTML → markdown) or downloads images to temp files. Supports Jina auth via `JINA_API_KEY`. Handles retries on 5xx/451 errors, content-length limits (5MB for images, 100KB for pages), and 60s timeout. |
 
 ### 🔄 Subagent Delegation
