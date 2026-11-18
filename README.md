@@ -47,12 +47,15 @@ Edit `.env.local`:
 | `PI_EXT_NTFY_TOPIC` | ntfy topic name (any unique string) | Required if ntfy is enabled |
 | `PLIK_URL` | Base URL of your [Plik](https://github.com/root-gg/plik) instance | Required for the `plik` MCP server |
 | `PLIK_TOKEN` | Plik API token (create one in the Plik web UI) | Required if your instance enforces authentication |
+| `SHAREPIN_TOKEN` | Bearer token for the `/pin/mint` endpoint on the same host, used by `share_file` / `share_text` | Optional — without it shares skip PIN minting |
 
 Treat `.env.local` as sensitive — it's already in `.gitignore`.
 
 ### 3b. MCP servers
 
 `mcp.json` configures MCP servers. `extensions/plik.ts` registers two native tools, `share_file` and `share_text`, that call the Plik REST API directly (`POST /upload`, then `POST /file/...`), so no Plik CLI or MCP server is needed. `PLIK_URL` and `PLIK_TOKEN` are read at call time; the token stays in `.env.local`.
+
+Every share then tries to mint a short-lived 6-character PIN for the download URL (`POST $PLIK_URL/pin/mint`, 30 min TTL) so a recipient can type the code at `<download domain>/p` instead of the long URL. The result carries a `pin` object (`code`, `short`, `page`, `expires`, `ttl`). The PIN is best-effort: a missing `SHAREPIN_TOKEN`, an unreachable service, a non-2xx response, or a malformed body all leave `pin` null with a human-readable `pinNote`, and the tool still returns the full URL.
 
 ### 4. Install npm package dependencies
 

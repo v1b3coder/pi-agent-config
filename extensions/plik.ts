@@ -12,9 +12,16 @@
  *   POST /upload                          { files: [{ fileName, fileSize, reference }] }
  *   POST /file/{uploadID}/{fileID}/{name}   multipart field "file"
  *
+ * A short-lived PIN is minted for the resulting download URL so the recipient
+ * can type a 6-character code instead of the long URL:
+ *   POST /pin/mint  { url, ttl }  →  { code, short, expires, ttl }
+ * The PIN is a bonus: any failure here (no token, service down, bad response)
+ * leaves `pin` null plus a `pinNote` and the share still returns the full URL.
+ *
  * Configuration comes from the environment, read at call time:
- *   PLIK_URL    required base URL, e.g. https://share.slush.cz
- *   PLIK_TOKEN  API token, created in the Plik web UI
+ *   PLIK_URL         required base URL, e.g. https://share.slush.cz
+ *   PLIK_TOKEN       API token, created in the Plik web UI
+ *   SHAREPIN_TOKEN   optional token for the PIN service, same base URL
  */
 
 import { openAsBlob } from "node:fs";
@@ -40,6 +47,17 @@ type PlikUpload = {
 	expireAt?: string;
 	oneShot?: boolean;
 	removable?: boolean;
+};
+
+const PIN_TTL_SECONDS = 1800;
+const PIN_TIMEOUT_MS = 8_000;
+
+type Pin = {
+	code: string;
+	short: string;
+	page: string;
+	expires?: string;
+	ttl: number;
 };
 
 const uploadParams = {
@@ -80,6 +98,55 @@ async function call(url: string, init: RequestInit): Promise<Response> {
 	return response;
 }
 
+/**
+ * Mint a short PIN for a download URL. Never throws: a missing token or an
+ * unreachable/unhappy PIN service degrades to a null PIN plus a note, so the
+ * share itself always succeeds with the full URL.
+ */
+async function mintPin(base: string, url: string, signal?: AbortSignal): Promise<{ pin: Pin | null; note?: string }> {
+	const token = process.env.SHAREPIN_TOKEN?.trim();
+	if (!token) {
+		return { pin: null, note: "SHAREPIN_TOKEN is not set; no PIN created" };
+	}
+
+	const timeout = AbortSignal.timeout(PIN_TIMEOUT_MS);
+	try {
+		const response = await fetch(`${base}/pin/mint`, {
+			method: "POST",
+			headers: {
+				Authorization: `Bearer ${token}`,
+				"Content-Type": "application/json",
+			},
+			body: JSON.stringify({ url, ttl: PIN_TTL_SECONDS }),
+			signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+		});
+		if (!response.ok) {
+			const detail = (await response.text()).trim();
+			return {
+				pin: null,
+				note: `PIN mint failed (${response.status})${detail ? `: ${detail}` : ""}`,
+			};
+		}
+
+		const minted = (await response.json()) as Partial<Pin>;
+		if (!minted.code || !minted.short) {
+			return { pin: null, note: "PIN mint returned no code" };
+		}
+		return {
+			pin: {
+				code: minted.code,
+				short: minted.short,
+				page: minted.short.replace(/\/[^/]+$/, ""),
+				expires: minted.expires,
+				ttl: minted.ttl ?? PIN_TTL_SECONDS,
+			},
+		};
+	} catch (error) {
+		const reason = error instanceof Error ? error.message : String(error);
+		return { pin: null, note: `PIN service unavailable: ${reason}` };
+	}
+}
+
 async function share(
 	fileName: string,
 	size: number,
@@ -117,10 +184,14 @@ async function share(
 	});
 
 	const domain = (upload.downloadURL || upload.downloadDomain || base).replace(/\/+$/, "");
+	const fileUrl = `${domain}/file/${upload.id}/${file.id}/${encodeURIComponent(fileName)}`;
+	const { pin, note } = await mintPin(base, fileUrl, signal);
 	const result = {
 		id: upload.id,
 		url: `${base}/#/?id=${upload.id}`,
-		file: `${domain}/file/${upload.id}/${file.id}/${encodeURIComponent(fileName)}`,
+		file: fileUrl,
+		pin,
+		...(note ? { pinNote: note } : {}),
 		expireAt: upload.expireAt,
 		oneShot: upload.oneShot ?? false,
 		removable: upload.removable ?? false,
@@ -136,10 +207,12 @@ export default function plikExtension(pi: ExtensionAPI) {
 		name: "share_file",
 		label: "Share File",
 		description:
-			"Upload a local file to the user's Plik instance and return the upload page and direct download URLs.",
+			"Upload a local file to the user's Plik instance and return the upload page and direct download URLs, plus a short-lived PIN for the download URL when the PIN service is configured.",
 		promptSnippet: "Share a local file through Plik",
 		promptGuidelines: [
 			"Write a short comment describing what the file is.",
+			"When the result has a pin, tell the human to open pin.page and enter pin.code, and say when it expires.",
+			"When pin is null, share the full URL only and do not mention PINs.",
 		],
 		parameters: Type.Object({
 			path: Type.String({ description: "Absolute path of the file to share" }),
@@ -165,10 +238,12 @@ export default function plikExtension(pi: ExtensionAPI) {
 		name: "share_text",
 		label: "Share Text",
 		description:
-			"Upload inline text as a named file to the user's Plik instance and return the upload page and direct download URLs.",
+			"Upload inline text as a named file to the user's Plik instance and return the upload page and direct download URLs, plus a short-lived PIN for the download URL when the PIN service is configured.",
 		promptSnippet: "Share text through Plik",
 		promptGuidelines: [
 			"Write a short comment describing what the content is.",
+			"When the result has a pin, tell the human to open pin.page and enter pin.code, and say when it expires.",
+			"When pin is null, share the full URL only and do not mention PINs.",
 		],
 		parameters: Type.Object({
 			filename: Type.String({ description: "Name for the uploaded file (e.g. snippet.go)" }),
