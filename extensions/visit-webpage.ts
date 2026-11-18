@@ -72,14 +72,21 @@ async function downloadImage(url: string): Promise<string> {
 	return filePath;
 }
 
-type Crawl4aiConfig = { endpoint: string; token: string };
+type Format = "md" | "html" | "png";
+
+type Crawl4aiConfig = { base: string; token: string };
 
 /** Crawl4AI is used when both CRAWL4AI_URL and CRAWL4AI_API_TOKEN are set. */
 function getCrawl4aiConfig(): Crawl4aiConfig | null {
 	const base = process.env["CRAWL4AI_URL"]?.trim();
 	const token = process.env["CRAWL4AI_API_TOKEN"]?.trim();
 	if (!base || !token) return null;
-	return { endpoint: `${base.replace(/\/+$/, "")}/md`, token };
+	return { base: base.replace(/\/+$/, ""), token };
+}
+
+function parseFormat(value: unknown): Format | null {
+	if (value === undefined || value === null) return "md";
+	return value === "md" || value === "html" || value === "png" ? value : null;
 }
 
 class FetchError extends Error {
@@ -91,34 +98,102 @@ class FetchError extends Error {
 	}
 }
 
-async function fetchViaCrawl4ai(config: Crawl4aiConfig, url: string, signal?: AbortSignal): Promise<string> {
-	const response = await fetch(config.endpoint, {
+function saveImage(buffer: Buffer, mime: string | undefined): string {
+	if (buffer.length > MAX_IMAGE_SIZE) {
+		throw new Error(`Image too large: ${buffer.length} bytes (max ${MAX_IMAGE_SIZE})`);
+	}
+
+	const ext = IMAGE_EXTENSIONS[mime?.toLowerCase() ?? ""] ?? ".png";
+	const filePath = join(tmpdir(), `visit-image-${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`);
+	writeFileSync(filePath, buffer);
+	return filePath;
+}
+
+async function crawl4aiPost(config: Crawl4aiConfig, path: string, body: unknown, signal?: AbortSignal): Promise<any> {
+	const response = await fetch(`${config.base}${path}`, {
 		method: "POST",
 		headers: {
 			...getHeaders(),
 			Authorization: `Bearer ${config.token}`,
 			"Content-Type": "application/json",
 		},
-		body: JSON.stringify({ url, f: "fit" }),
+		body: JSON.stringify(body),
 		signal: signal ?? AbortSignal.timeout(TIMEOUT),
 	});
 
 	if (!response.ok) {
 		const detail = await response.text().catch(() => "");
 		throw new FetchError(
-			`Crawl4AI HTTP ${response.status}${detail ? `: ${truncateToWidth(detail, 300)}` : ""}`,
+			`Crawl4AI ${path} HTTP ${response.status}${detail ? `: ${truncateToWidth(detail, 300)}` : ""}`,
 			response.status === 451 || response.status >= 500,
 		);
 	}
 
-	const parsed = (await response.json()) as { markdown?: string; success?: boolean; detail?: string };
-	if (parsed.success === false) {
-		throw new FetchError(`Crawl4AI crawl failed: ${parsed.detail ?? "unknown error"}`, true);
+	return response.json();
+}
+
+/** Neither /md nor /html accept css_selector, so selectors go through /crawl. */
+async function crawl4aiCrawl(config: Crawl4aiConfig, url: string, selector: string | undefined, withFilter: boolean, signal?: AbortSignal): Promise<any> {
+	const params: Record<string, unknown> = {};
+	if (selector) params.css_selector = selector;
+	if (withFilter) {
+		params.markdown_generator = {
+			type: "DefaultMarkdownGenerator",
+			params: { content_filter: { type: "PruningContentFilter", params: {} } },
+		};
 	}
-	if (!parsed.markdown) {
-		throw new FetchError("Crawl4AI returned empty markdown", true);
+
+	const data = await crawl4aiPost(config, "/crawl", { urls: [url], crawler_config: { type: "CrawlerRunConfig", params } }, signal);
+	const result = data?.results?.[0];
+	if (!result) {
+		throw new FetchError("Crawl4AI /crawl returned no results", true);
 	}
-	return parsed.markdown;
+	if (!result.success) {
+		throw new FetchError(`Crawl4AI crawl failed: ${result.error_message ?? "unknown error"}`, true);
+	}
+	return result;
+}
+
+async function fetchMarkdownCrawl4ai(config: Crawl4aiConfig, url: string, selector: string | undefined, signal?: AbortSignal): Promise<string> {
+	if (!selector) {
+		const data = await crawl4aiPost(config, "/md", { url, f: "fit" }, signal);
+		if (data?.success === false) {
+			throw new FetchError(`Crawl4AI crawl failed: ${data?.detail ?? "unknown error"}`, true);
+		}
+		if (!data?.markdown?.trim()) {
+			throw new FetchError("Crawl4AI returned empty markdown", true);
+		}
+		return data.markdown.trim();
+	}
+
+	const result = await crawl4aiCrawl(config, url, selector, true, signal);
+	const markdown = result.markdown ?? {};
+	const text = (markdown.fit_markdown || markdown.raw_markdown || "").trim();
+	if (!text) {
+		throw new FetchError(`Crawl4AI found no content for css_selector "${selector}"`, false);
+	}
+	return text;
+}
+
+async function fetchHtmlCrawl4ai(config: Crawl4aiConfig, url: string, selector: string | undefined, signal?: AbortSignal): Promise<string> {
+	const result = await crawl4aiCrawl(config, url, selector, false, signal);
+	const html = (result.cleaned_html || result.html || "").trim();
+	// A non-matching selector yields an empty <html></html> shell rather than an error
+	if (!html || (selector && !html.replace(/<[^>]*>/g, "").trim())) {
+		throw new FetchError(
+			selector ? `Crawl4AI found no HTML for css_selector "${selector}"` : "Crawl4AI returned empty HTML",
+			!selector,
+		);
+	}
+	return html;
+}
+
+async function fetchScreenshotCrawl4ai(config: Crawl4aiConfig, url: string, signal?: AbortSignal): Promise<string> {
+	const data = await crawl4aiPost(config, "/screenshot", { url }, signal);
+	if (!data?.screenshot) {
+		throw new FetchError(`Crawl4AI screenshot failed: ${data?.detail ?? "no screenshot returned"}`, true);
+	}
+	return saveImage(Buffer.from(data.screenshot, "base64"), data.mime);
 }
 
 async function fetchViaJina(url: string, signal?: AbortSignal): Promise<string> {
@@ -134,9 +209,34 @@ async function fetchViaJina(url: string, signal?: AbortSignal): Promise<string> 
 	return response.text();
 }
 
-async function fetchWebpage(url: string, signal?: AbortSignal): Promise<{ markdown: string; via: string }> {
+type Content = { kind: "markdown" | "html" | "image"; body: string; via: string };
+
+async function fetchContent(
+	url: string,
+	format: Format,
+	selector: string | undefined,
+	signal?: AbortSignal,
+): Promise<Content> {
 	const crawl4ai = getCrawl4aiConfig();
 	const via = crawl4ai ? "crawl4ai" : "jina";
+
+	const fetchOnce = async (): Promise<Content> => {
+		if (format === "png") {
+			if (!crawl4ai) throw new FetchError("format 'png' requires Crawl4AI", false);
+			return { kind: "image", body: await fetchScreenshotCrawl4ai(crawl4ai, url, signal), via };
+		}
+
+		if (format === "html") {
+			if (!crawl4ai) throw new FetchError("format 'html' requires Crawl4AI", false);
+			return { kind: "html", body: await fetchHtmlCrawl4ai(crawl4ai, url, selector, signal), via };
+		}
+
+		if (crawl4ai) {
+			return { kind: "markdown", body: await fetchMarkdownCrawl4ai(crawl4ai, url, selector, signal), via };
+		}
+		if (selector) throw new FetchError("css_selector requires Crawl4AI", false);
+		return { kind: "markdown", body: await fetchViaJina(url, signal), via };
+	};
 
 	let lastError: Error | null = null;
 
@@ -146,17 +246,21 @@ async function fetchWebpage(url: string, signal?: AbortSignal): Promise<{ markdo
 		}
 
 		try {
-			const text = crawl4ai ? await fetchViaCrawl4ai(crawl4ai, url, signal) : await fetchViaJina(url, signal);
-
-			// Clean up multiple line breaks (same as Python re.sub(r"\n{3,}", "\n\n", content))
-			const cleaned = text.replace(/\n{3,}/g, "\n\n");
-
-			// Truncate if too long
-			if (cleaned.length > MAX_CONTENT_LENGTH) {
-				return { markdown: cleaned.slice(0, MAX_CONTENT_LENGTH) + "\n\n..._Content truncated_...", via };
+			const result = await fetchOnce();
+			if (result.kind === "image") {
+				return result;
 			}
 
-			return { markdown: cleaned, via };
+			// Clean up multiple line breaks (same as Python re.sub(r"\n{3,}", "\n\n", content))
+			const cleaned = result.body.replace(/\n{3,}/g, "\n\n");
+
+			// Truncate if too long
+			result.body =
+				cleaned.length > MAX_CONTENT_LENGTH
+					? cleaned.slice(0, MAX_CONTENT_LENGTH) + "\n\n..._Content truncated_..."
+					: cleaned;
+
+			return result;
 		} catch (err) {
 			if (err instanceof Error && err.name === "AbortError") {
 				throw err;
@@ -176,22 +280,34 @@ export default function (pi: ExtensionAPI) {
 		name: "visit_webpage",
 		label: "Visit Webpage",
 		description:
-			"Fetch a URL and extract its content as markdown (via Crawl4AI when CRAWL4AI_URL + CRAWL4AI_API_TOKEN are set, otherwise Jina Reader), or download images to a temp file. " +
-			"Use for reading articles, documentation, or any web page content. " +
-			"Handles both HTML pages (JavaScript-rendered) and image URLs.",
+			"Fetch a URL and return its content as markdown (default), cleaned HTML, or a PNG screenshot saved to a temp file. " +
+			"Uses Crawl4AI when CRAWL4AI_URL + CRAWL4AI_API_TOKEN are set, otherwise Jina Reader (markdown only). " +
+			"Image URLs are downloaded to a temp file regardless of format.",
 		promptSnippet:
-			"Fetch a webpage and extract content as markdown, or download images. Use this tool when the user asks to open, visit, fetch, or read a URL.",
+			"Fetch a webpage as markdown, HTML, or screenshot, or download images. Use this tool when the user asks to open, visit, fetch, or read a URL.",
 		promptGuidelines: [
 			"Use visit_webpage when the user asks to visit, open, fetch, or read a URL or website.",
-			"visit_webpage handles both HTML pages (returns markdown) and images (downloads to temp file).",
-			"Use the read tool to view downloaded images whose paths are returned by visit_webpage.",
+			"Default format 'md' returns readable markdown; use 'html' when you need page structure or attributes, 'png' when visual layout matters (screenshot goes to a temp file for the read tool).",
+			"Use css_selector to drop navigation and boilerplate when you know the container element (e.g. 'article', '#search', 'td.title'). It works with format 'md' and 'html'.",
+			"Use the read tool to view downloaded images or screenshots whose paths are returned by visit_webpage.",
 		],
 		parameters: Type.Object({
 			url: Type.String({ description: "URL to visit (e.g., https://example.com/article)" }),
+			format: Type.Optional(
+				Type.Union([Type.Literal("md"), Type.Literal("html"), Type.Literal("png")], {
+					description: "'md' (default) readable markdown, 'html' cleaned page HTML, 'png' screenshot saved to a temp file.",
+				}),
+			),
+			css_selector: Type.Optional(
+				Type.String({
+					description:
+						"CSS selector narrowing the extracted content, e.g. 'article', '#search', 'td.title'. Only for format 'md' or 'html'.",
+				}),
+			),
 		}),
 		renderCall(args, _theme, context) {
 			const text: Text = context.lastComponent ?? new Text("", 0, 0);
-			text.setText(`visit_webpage: ${truncateToWidth(args.url ?? "", 120)}`);
+			text.setText(`visit_webpage: ${truncateToWidth(args.url ?? "", 100)}${args.format && args.format !== "md" ? ` [${args.format}]` : ""}${args.css_selector ? ` {${truncateToWidth(args.css_selector, 40)}}` : ""}`);
 			return text;
 		},
 
@@ -202,7 +318,9 @@ export default function (pi: ExtensionAPI) {
 			context: any,
 		): Component {
 			const text: Text = context.lastComponent ?? new Text("", 0, 0);
-			const details = result.details as { url?: string; type?: string; filePath?: string; via?: string } | undefined;
+			const details = result.details as
+				| { url?: string; type?: string; filePath?: string; via?: string; format?: string }
+				| undefined;
 
 			if (!options.expanded) {
 				// Collapsed mode: show a short summary
@@ -218,7 +336,7 @@ export default function (pi: ExtensionAPI) {
 					// Count non-whitespace chars as content
 					const contentLen = fullText.replace(/\s/g, "").length;
 					text.setText(
-						`— ${contentLen} chars fetched from ${details?.url ?? "URL"}${details?.via ? ` · ${details.via}` : ""}`,
+						`— ${contentLen} chars fetched from ${details?.url ?? "URL"}${details?.via ? ` · ${details.via}` : ""}${details?.format && details.format !== "md" ? ` · ${details.format}` : ""}`,
 					);
 				}
 			} else {
@@ -233,11 +351,46 @@ export default function (pi: ExtensionAPI) {
 		},
 
 		async execute(_toolCallId, params, signal, onUpdate) {
-			const { url } = params;
+			const { url, css_selector } = params;
 
 			if (!url.startsWith("http://") && !url.startsWith("https://")) {
 				return {
 					content: [{ type: "text", text: `Error: URL must start with http:// or https://\n\nGot: ${url}` }],
+					isError: true,
+				};
+			}
+
+			const format = parseFormat(params.format);
+			if (!format) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: `Error: unknown format \"${params.format}\". Use 'md' (default), 'html' or 'png'.`,
+						},
+					],
+					isError: true,
+				};
+			}
+
+			const selector = css_selector?.trim() || undefined;
+
+			if (format === "png" && selector) {
+				return {
+					content: [{ type: "text", text: "Error: css_selector cannot be combined with format 'png' (only the viewport is captured)." }],
+					isError: true,
+				};
+			}
+
+			if ((format !== "md" || selector) && !getCrawl4aiConfig()) {
+				const needs = format === "md" ? "css_selector" : `format '${format}'`;
+				return {
+					content: [
+						{
+							type: "text",
+							text: `Error: ${needs} needs Crawl4AI. Set CRAWL4AI_URL and CRAWL4AI_API_TOKEN, or use format 'md' (Jina Reader supports markdown only).`,
+						},
+					],
 					isError: true,
 				};
 			}
@@ -265,10 +418,24 @@ export default function (pi: ExtensionAPI) {
 				}
 
 				// Handle webpage
-				const { markdown, via } = await fetchWebpage(url, signal);
+				const content = await fetchContent(url, format, selector, signal);
+
+				if (content.kind === "image") {
+					return {
+						content: [
+							{
+								type: "text",
+								text: `Screenshot saved to: ${content.body}\n\nUse the read tool to view it: read ${content.body}`,
+							},
+						],
+						details: { filePath: content.body, type: "image", format, via: content.via },
+					};
+				}
+
+				const heading = content.kind === "html" ? "## HTML from" : "## Content from";
 				return {
-					content: [{ type: "text", text: `## Content from ${url}\n\n${markdown}` }],
-					details: { url, type: "html", via },
+					content: [{ type: "text", text: `${heading} ${url}\n\n${content.body}` }],
+					details: { url, type: content.kind, format, via: content.via },
 				};
 			} catch (err) {
 				const message = err instanceof Error ? err.message : String(err);
