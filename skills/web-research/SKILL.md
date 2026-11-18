@@ -1,6 +1,6 @@
 ---
 name: web-research
-description: "Orchestrated multi-round web research. Frames the question, sends isolated researcher subagents per angle, keeps raw evidence on disk and only digests in the main thread, then writes a cited report plus findings.json. Trigger on the words themselves: 'research', 'udělej research', 'prozkoumej', 'deep dive', 'udělej report', 'zjisti a shrň' — an explicit request for research wins even when one page might do. Also trigger whenever no single page settles the question: technology or vendor comparisons, landscape and state-of-the-art surveys, 'what changed since X', library selection, due diligence, architecture decisions with external constraints. Not for single facts, version numbers, or reading one doc page (use web_search or visit_webpage directly)."
+description: "Orchestrated multi-round web research. Frames the question, sends isolated researcher subagents per angle, keeps raw evidence on disk and only digests in the main thread, then writes a cited report plus findings.json. Trigger on an explicit request for research in any language, even when one page might do. Also trigger whenever no single page settles the question: technology or vendor comparisons, landscape and state-of-the-art surveys, 'what changed since X', library selection, due diligence, architecture decisions with external constraints. Not for single facts, version numbers, or reading one doc page (use web_search or visit_webpage directly)."
 ---
 
 # Web Research
