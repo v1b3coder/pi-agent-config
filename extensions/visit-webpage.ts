@@ -84,9 +84,8 @@ function getCrawl4aiConfig(): Crawl4aiConfig | null {
 	return { base: base.replace(/\/+$/, ""), token };
 }
 
-function parseFormat(value: unknown): Format | null {
-	if (value === undefined || value === null) return "md";
-	return value === "md" || value === "html" || value === "png" ? value : null;
+function parseFormat(value: "md" | "html" | "png" | undefined): Format {
+	return value ?? "md";
 }
 
 class FetchError extends Error {
@@ -361,18 +360,6 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			const format = parseFormat(params.format);
-			if (!format) {
-				return {
-					content: [
-						{
-							type: "text",
-							text: `Error: unknown format \"${params.format}\". Use 'md' (default), 'html' or 'png'.`,
-						},
-					],
-					isError: true,
-				};
-			}
-
 			const selector = css_selector?.trim() || undefined;
 
 			if (format === "png" && selector) {
