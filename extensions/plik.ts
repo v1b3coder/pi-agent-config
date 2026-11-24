@@ -24,9 +24,11 @@
  *   SHAREPIN_TOKEN   optional token for the PIN service, same base URL
  */
 
-import { openAsBlob } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import { basename } from "node:path";
+import { Readable } from "node:stream";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
@@ -35,6 +37,12 @@ type UploadParams = {
 	one_shot?: boolean;
 	removable?: boolean;
 	comments: string;
+};
+
+/** A request body plus the exact byte count to declare to the server. */
+type Payload = {
+	size: number;
+	open: () => Iterable<Uint8Array> | AsyncIterable<Uint8Array>;
 };
 
 type PlikFile = { id: string; fileName: string };
@@ -88,7 +96,16 @@ function config(): { base: string; token: string } {
 }
 
 async function call(url: string, init: RequestInit): Promise<Response> {
-	const response = await fetch(url, init);
+	let response: Response;
+	try {
+		response = await fetch(url, init);
+	} catch (error) {
+		// undici collapses transport failures into a bare "fetch failed"; carry the cause.
+		const cause = (error as { cause?: { code?: string; message?: string } }).cause;
+		throw new Error(
+			`Plik ${init.method ?? "GET"} ${url} failed: ${String(error)} <- ${cause?.code || cause?.message || "unknown cause"}`,
+		);
+	}
 	if (!response.ok) {
 		const detail = (await response.text()).trim();
 		throw new Error(
@@ -96,6 +113,14 @@ async function call(url: string, init: RequestInit): Promise<Response> {
 		);
 	}
 	return response;
+}
+
+/** Escape a filename for a quoted `Content-Disposition` parameter. */
+function quotedString(value: string): string {
+	return value
+		.replace(/[\\"]/g, (c) => `\\${c}`)
+		.replace(/\r/g, "\\r")
+		.replace(/\n/g, "\\n");
 }
 
 /**
@@ -149,8 +174,7 @@ async function mintPin(base: string, url: string, signal?: AbortSignal): Promise
 
 async function share(
 	fileName: string,
-	size: number,
-	content: () => Blob | Promise<Blob>,
+	payload: Payload,
 	params: UploadParams,
 	signal?: AbortSignal,
 ): Promise<{ content: { type: "text"; text: string }[]; details: Record<string, unknown> }> {
@@ -164,7 +188,7 @@ async function share(
 			oneShot: params.one_shot ?? false,
 			removable: params.removable ?? false,
 			comments: params.comments,
-			files: [{ fileName, fileSize: size, reference: "0" }],
+			files: [{ fileName, fileSize: payload.size, reference: "0" }],
 		}),
 		signal,
 	});
@@ -174,12 +198,37 @@ async function share(
 		throw new Error("Plik did not return a file entry for the upload");
 	}
 
-	const form = new FormData();
-	form.append("file", await content(), fileName);
+	// Hand-built multipart body, streamed from disk. `FormData` derives its
+	// Content-Length from `Blob.size`, and `fs.openAsBlob()` reports that size
+	// modulo 2^32 for files >= 4 GiB — the declared length then overshoots the
+	// body, the closing boundary never arrives and the server stalls until it
+	// times out. `payload.size` comes from stat(), so the length stays exact.
+	const boundary = `----plik${randomUUID()}`;
+	const head = Buffer.from(
+		`--${boundary}\r\n` +
+			`Content-Disposition: form-data; name="file"; filename="${quotedString(fileName)}"\r\n` +
+			`Content-Type: application/octet-stream\r\n\r\n`,
+	);
+	const tail = Buffer.from(`\r\n--${boundary}--\r\n`);
+	const body = Readable.toWeb(
+		Readable.from(
+			(async function* () {
+				yield head;
+				yield* payload.open();
+				yield tail;
+			})(),
+		),
+	);
+
 	await call(`${base}/file/${upload.id}/${file.id}/${encodeURIComponent(fileName)}`, {
 		method: "POST",
-		headers: { "X-PlikToken": token },
-		body: form,
+		headers: {
+			"X-PlikToken": token,
+			"Content-Type": `multipart/form-data; boundary=${boundary}`,
+			"Content-Length": String(head.length + payload.size + tail.length),
+		},
+		body,
+		duplex: "half",
 		signal,
 	});
 
@@ -226,8 +275,7 @@ export default function plikExtension(pi: ExtensionAPI) {
 			const name = basename(params.path);
 			return share(
 				name,
-				info.size,
-				() => openAsBlob(params.path),
+				{ size: info.size, open: () => createReadStream(params.path) },
 				params,
 				signal,
 			);
@@ -251,8 +299,13 @@ export default function plikExtension(pi: ExtensionAPI) {
 			...uploadParams,
 		}),
 		async execute(_toolCallId, params, signal) {
-			const blob = new Blob([params.content]);
-			return share(params.filename, blob.size, () => blob, params, signal);
+			const data = Buffer.from(params.content);
+			return share(
+				params.filename,
+				{ size: data.length, open: () => [data] },
+				params,
+				signal,
+			);
 		},
 	});
 }
