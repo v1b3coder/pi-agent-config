@@ -27,6 +27,8 @@
 import { randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
+import http from "node:http";
+import https from "node:https";
 import { basename } from "node:path";
 import { Readable } from "node:stream";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -59,6 +61,9 @@ type PlikUpload = {
 
 const PIN_TTL_SECONDS = 1800;
 const PIN_TIMEOUT_MS = 8_000;
+
+/** Pins TLS to HTTP/1.1 so uploads are not throttled by HTTP/2 flow control. */
+const HTTPS1_AGENT = new https.Agent({ ALPNProtocols: ["http/1.1"] });
 
 type Pin = {
 	code: string;
@@ -100,11 +105,7 @@ async function call(url: string, init: RequestInit): Promise<Response> {
 	try {
 		response = await fetch(url, init);
 	} catch (error) {
-		// undici collapses transport failures into a bare "fetch failed"; carry the cause.
-		const cause = (error as { cause?: { code?: string; message?: string } }).cause;
-		throw new Error(
-			`Plik ${init.method ?? "GET"} ${url} failed: ${String(error)} <- ${cause?.code || cause?.message || "unknown cause"}`,
-		);
+		throw transportError(init.method ?? "GET", url, error);
 	}
 	if (!response.ok) {
 		const detail = (await response.text()).trim();
@@ -113,6 +114,68 @@ async function call(url: string, init: RequestInit): Promise<Response> {
 		);
 	}
 	return response;
+}
+
+/** Build a transport error that keeps the underlying cause (undici reports a bare "fetch failed"). */
+function transportError(method: string, url: string, error: unknown): Error {
+	const cause = (error as { cause?: { code?: string; message?: string } }).cause;
+	return new Error(
+		`Plik ${method} ${url} failed: ${String(error)} <- ${cause?.code || cause?.message || "unknown cause"}`,
+	);
+}
+
+/**
+ * POST a streamed body over HTTP/1.1.
+ *
+ * `fetch()` negotiates HTTP/2, whose default per-stream flow-control window is
+ * 64 KiB: on a 64 ms path that caps the body at ~1 MB/s no matter how the file
+ * is chunked, while the same upload over HTTP/1.1 uses the whole link (~19x
+ * faster here). Pinning ALPN to http/1.1 also keeps backpressure native.
+ */
+async function postStream(
+	url: string,
+	headers: Record<string, string>,
+	body: Readable,
+	signal?: AbortSignal,
+): Promise<void> {
+	const target = new URL(url);
+	const transport = target.protocol === "http:" ? http : https;
+	let status: number;
+	let detail: string;
+	try {
+		const result = await new Promise<{ status: number; detail: string }>((resolve, reject) => {
+			const request = transport.request(
+				target,
+				{
+					method: "POST",
+					headers,
+					signal,
+					...(target.protocol === "https:" ? { agent: HTTPS1_AGENT } : {}),
+				},
+				(response) => {
+					const chunks: Buffer[] = [];
+					response.on("data", (chunk: Buffer) => chunks.push(chunk));
+					response.on("end", () =>
+						resolve({ status: response.statusCode ?? 0, detail: Buffer.concat(chunks).toString().trim() }),
+					);
+					response.on("error", reject);
+				},
+			);
+			request.on("error", (error) => {
+				body.destroy();
+				reject(error);
+			});
+			body.on("error", (error) => request.destroy(error));
+			body.pipe(request);
+		});
+		status = result.status;
+		detail = result.detail;
+	} catch (error) {
+		throw transportError("POST", url, error);
+	}
+	if (status < 200 || status >= 300) {
+		throw new Error(`Plik POST ${url} failed (${status})${detail ? `: ${detail}` : ""}`);
+	}
 }
 
 /** Escape a filename for a quoted `Content-Disposition` parameter. */
@@ -210,27 +273,24 @@ async function share(
 			`Content-Type: application/octet-stream\r\n\r\n`,
 	);
 	const tail = Buffer.from(`\r\n--${boundary}--\r\n`);
-	const body = Readable.toWeb(
-		Readable.from(
-			(async function* () {
-				yield head;
-				yield* payload.open();
-				yield tail;
-			})(),
-		),
+	const body = Readable.from(
+		(async function* () {
+			yield head;
+			yield* payload.open();
+			yield tail;
+		})(),
 	);
 
-	await call(`${base}/file/${upload.id}/${file.id}/${encodeURIComponent(fileName)}`, {
-		method: "POST",
-		headers: {
+	await postStream(
+		`${base}/file/${upload.id}/${file.id}/${encodeURIComponent(fileName)}`,
+		{
 			"X-PlikToken": token,
 			"Content-Type": `multipart/form-data; boundary=${boundary}`,
 			"Content-Length": String(head.length + payload.size + tail.length),
 		},
 		body,
-		duplex: "half",
 		signal,
-	});
+	);
 
 	const domain = (upload.downloadURL || upload.downloadDomain || base).replace(/\/+$/, "");
 	const fileUrl = `${domain}/file/${upload.id}/${file.id}/${encodeURIComponent(fileName)}`;
