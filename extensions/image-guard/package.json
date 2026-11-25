@@ -1,0 +1,9 @@
+{
+  "name": "pi-image-guard",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Canonicalizes inline images before every model call",
+  "dependencies": {
+    "sharp": "^0.34.5"
+  }
+}
