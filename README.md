@@ -45,9 +45,8 @@ Edit `.env.local`:
 | `TAVILY_API_KEY` | API key for [Tavily](https://tavily.com) web search | Optional — needed for the `web_search` tool |
 | `PI_EXT_NTFY_ENABLED` | Set to `1` to enable mobile push notifications via [ntfy](https://ntfy.sh) | Optional |
 | `PI_EXT_NTFY_TOPIC` | ntfy topic name (any unique string) | Required if ntfy is enabled |
-| `PLIK_URL` | Base URL of your [Plik](https://github.com/root-gg/plik) instance | Required for the `plik` MCP server |
-| `PLIK_TOKEN` | Plik API token (create one in the Plik web UI) | Required if your instance enforces authentication |
-| `SHAREPIN_TOKEN` | Bearer token for the `/pin/mint` endpoint on the same host, used by `share_file` / `share_text` | Optional — without it shares skip PIN minting |
+| `PLIK_URL` | Base URL of your [Plik](https://github.com/root-gg/plik) instance | Required for `share_file` / `share_text` |
+| `PLIK_TOKEN` | Plik API token (`plik_…`, create one in the Plik web UI) | Required if your instance enforces authentication; also authorizes `/pin/mint` and `/pin/slug` |
 
 Treat `.env.local` as sensitive — it's already in `.gitignore`.
 
@@ -55,7 +54,11 @@ Treat `.env.local` as sensitive — it's already in `.gitignore`.
 
 `mcp.json` configures MCP servers. `extensions/plik.ts` registers two native tools, `share_file` and `share_text`, that call the Plik REST API directly (`POST /upload`, then `POST /file/...`), so no Plik CLI or MCP server is needed. `PLIK_URL` and `PLIK_TOKEN` are read at call time; the token stays in `.env.local`.
 
-Every share then tries to mint a short-lived 6-character PIN for the download URL (`POST $PLIK_URL/pin/mint`, 30 min TTL) so a recipient can type the code at `<download domain>/p` instead of the long URL. The result carries a `pin` object (`code`, `short`, `page`, `expires`, `ttl`). The PIN is best-effort: a missing `SHAREPIN_TOKEN`, an unreachable service, a non-2xx response, or a malformed body all leave `pin` null with a human-readable `pinNote`, and the tool still returns the full URL.
+Every share then tries to mint a short-lived 6-character PIN for the download URL (`POST $PLIK_URL/pin/mint`, 30 min TTL) so a recipient can type the code at `<download domain>/p` instead of the long URL. The result carries a `pin` object (`code`, `short`, `page`, `expires`, `ttl`).
+
+Passing the optional `slug` argument also reserves a human-readable name for the same URL (`PUT $PLIK_URL/pin/slug/<slug>`, 3–63 chars of `[a-z0-9-]`). Reusing a slug you already own repoints it at the new upload, which is what makes it a long-lived link across artifacts; the server lowercases the name and its answer is the canonical one, so the result carries a `slug` object (`name`, `url`, `created`, `expires`). A slug lives exactly as long as its upload, so set `ttl` when it should outlive the server default.
+
+Both are best-effort: an unreachable service, a non-2xx response, a malformed body, a slug taken by another owner, or an upload that expires in under 60 s all leave `pin`/`slug` null with a human-readable `pinNote`/`slugNote`, and the tool still returns the full URL. Both endpoints authenticate with the same `X-PlikToken` header as the rest of the API — `Authorization: Bearer` is ignored, which is why `SHAREPIN_TOKEN` is no longer read.
 
 ### 4. Install npm package dependencies
 
@@ -276,7 +279,7 @@ Configured in `modes.json` — all use **DeepSeek V4 Flash** via LiteLLM with di
 │   ├── pi-footer.json             # Footer widget layout config
 │   ├── pi-goal-audit.ts           # Goal mode with independent auditor
 │   ├── pi-goal-audit-helpers.ts   # Goal audit helper functions
-│   ├── plik.ts                    # share_file / share_text through the Plik API
+│   ├── plik.ts                    # share_file / share_text through the Plik API (PIN + slug)
 │   ├── preset.ts                  # Switchable tool/skill presets
 │   ├── prompt-history.ts          # Persisted prompt history across sessions
 │   ├── subagent.ts                # Isolated child session delegation

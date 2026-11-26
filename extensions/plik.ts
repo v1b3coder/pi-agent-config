@@ -6,7 +6,8 @@
  *   - `share_text` — upload inline text as a named file
  *
  * Both require a `comments` description of the content. Optional `ttl`,
- * `one_shot`, and `removable` default to the server's behavior.
+ * `one_shot`, and `removable` default to the server's behavior; optional `slug`
+ * additionally reserves a human-readable name for the result.
  *
  * Each share creates an upload with one file reference, then uploads the file:
  *   POST /upload                          { files: [{ fileName, fileSize, reference }] }
@@ -15,13 +16,23 @@
  * A short-lived PIN is minted for the resulting download URL so the recipient
  * can type a 6-character code instead of the long URL:
  *   POST /pin/mint  { url, ttl }  →  { code, short, expires, ttl }
- * The PIN is a bonus: any failure here (no token, service down, bad response)
- * leaves `pin` null plus a `pinNote` and the share still returns the full URL.
+ *
+ * When `slug` is given, a human-readable reservation is written for the same
+ * URL, and reusing a slug this user already owns repoints it at the new upload:
+ *   PUT /pin/slug/{slug}  { url }  →  { slug, short, expires, created }
+ * The server lowercases the requested name, so its answer is the canonical one.
+ *
+ * Both are best-effort: any failure (service down, slug taken, upload about to
+ * expire) leaves `pin`/`slug` null plus a note, and the share still returns the
+ * full download URL.
+ *
+ * The PIN and slug endpoints authenticate with the same `X-PlikToken` header as
+ * the rest of the API (`Authorization: Bearer` is not read), so one token does
+ * everything.
  *
  * Configuration comes from the environment, read at call time:
  *   PLIK_URL         required base URL, e.g. https://share.slush.cz
- *   PLIK_TOKEN       API token, created in the Plik web UI
- *   SHAREPIN_TOKEN   optional token for the PIN service, same base URL
+ *   PLIK_TOKEN       Plik API token (`plik_…`), created in the Plik web UI
  */
 
 import { randomUUID } from "node:crypto";
@@ -38,6 +49,7 @@ type UploadParams = {
 	ttl?: number;
 	one_shot?: boolean;
 	removable?: boolean;
+	slug?: string;
 	comments: string;
 };
 
@@ -73,6 +85,21 @@ type Pin = {
 	ttl: number;
 };
 
+type Slug = {
+	name: string;
+	url: string;
+	created: boolean;
+	expires?: string;
+};
+
+/** Statuses whose bare code does not say what the caller can do about it. */
+const SLUG_HINTS: Record<number, string> = {
+	403: "the upload belongs to another user",
+	409: "the slug is reserved by another owner",
+	410: "the upload must stay valid for at least 60 s",
+	507: "the slug table is full (10 000)",
+};
+
 const uploadParams = {
 	ttl: Type.Optional(
 		Type.Number({ description: "Time to live in seconds (0 = server default)" }),
@@ -82,6 +109,15 @@ const uploadParams = {
 	),
 	removable: Type.Optional(
 		Type.Boolean({ description: "Allow anyone to delete the upload" }),
+	),
+	slug: Type.Optional(
+		Type.String({
+			pattern: "^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$",
+			description:
+				"Optional human-readable slug (3-63 chars, lowercase a-z 0-9 and dashes, no leading or trailing dash). " +
+				"Reusing a slug you already own repoints it at this new upload, which makes it a long-lived link. " +
+				"The slug expires together with this upload, so set ttl if it should outlive the default.",
+		}),
 	),
 	comments: Type.String({
 		minLength: 1,
@@ -187,22 +223,22 @@ function quotedString(value: string): string {
 }
 
 /**
- * Mint a short PIN for a download URL. Never throws: a missing token or an
- * unreachable/unhappy PIN service degrades to a null PIN plus a note, so the
- * share itself always succeeds with the full URL.
+ * Mint a short PIN for a download URL. Never throws: an unreachable/unhappy
+ * PIN service degrades to a null PIN plus a note, so the share itself always
+ * succeeds with the full URL.
  */
-async function mintPin(base: string, url: string, signal?: AbortSignal): Promise<{ pin: Pin | null; note?: string }> {
-	const token = process.env.SHAREPIN_TOKEN?.trim();
-	if (!token) {
-		return { pin: null, note: "SHAREPIN_TOKEN is not set; no PIN created" };
-	}
-
+async function mintPin(
+	base: string,
+	token: string,
+	url: string,
+	signal?: AbortSignal,
+): Promise<{ pin: Pin | null; note?: string }> {
 	const timeout = AbortSignal.timeout(PIN_TIMEOUT_MS);
 	try {
 		const response = await fetch(`${base}/pin/mint`, {
 			method: "POST",
 			headers: {
-				Authorization: `Bearer ${token}`,
+				"X-PlikToken": token,
 				"Content-Type": "application/json",
 			},
 			body: JSON.stringify({ url, ttl: PIN_TTL_SECONDS }),
@@ -232,6 +268,56 @@ async function mintPin(base: string, url: string, signal?: AbortSignal): Promise
 	} catch (error) {
 		const reason = error instanceof Error ? error.message : String(error);
 		return { pin: null, note: `PIN service unavailable: ${reason}` };
+	}
+}
+
+/**
+ * Reserve a slug for a download URL, or repoint one this user already owns.
+ * Never throws: like the PIN, a failure degrades to a null slug plus a note so
+ * the uploaded artifact is not stranded. The response carries the canonical
+ * slug, and echoing the requested name instead would hand out a dead link.
+ */
+async function putSlug(
+	base: string,
+	token: string,
+	name: string,
+	url: string,
+	domain: string,
+	signal?: AbortSignal,
+): Promise<{ slug: Slug | null; note?: string }> {
+	try {
+		const response = await fetch(`${base}/pin/slug/${encodeURIComponent(name)}`, {
+			method: "PUT",
+			headers: { "X-PlikToken": token, "Content-Type": "application/json" },
+			body: JSON.stringify({ url }),
+			signal,
+		});
+		const detail = (await response.text()).trim();
+		if (!response.ok) {
+			const hint = SLUG_HINTS[response.status];
+			return {
+				slug: null,
+				note: `slug ${name} failed (${response.status})${detail ? `: ${detail}` : ""}${hint ? ` — ${hint}` : ""}`,
+			};
+		}
+		const stored = JSON.parse(detail || "{}") as {
+			slug?: string;
+			short?: string;
+			expires?: string;
+			created?: boolean;
+		};
+		const canonical = stored.slug ?? name;
+		return {
+			slug: {
+				name: canonical,
+				url: stored.short ?? `${domain}/s/${canonical}`,
+				created: stored.created ?? false,
+				expires: stored.expires,
+			},
+		};
+	} catch (error) {
+		const reason = error instanceof Error ? error.message : String(error);
+		return { slug: null, note: `slug ${name} request failed: ${reason}` };
 	}
 }
 
@@ -294,13 +380,16 @@ async function share(
 
 	const domain = (upload.downloadURL || upload.downloadDomain || base).replace(/\/+$/, "");
 	const fileUrl = `${domain}/file/${upload.id}/${file.id}/${encodeURIComponent(fileName)}`;
-	const { pin, note } = await mintPin(base, fileUrl, signal);
+	const { pin, note } = await mintPin(base, token, fileUrl, signal);
+	const slug = params.slug ? await putSlug(base, token, params.slug, fileUrl, domain, signal) : undefined;
 	const result = {
 		id: upload.id,
 		url: `${base}/#/?id=${upload.id}`,
 		file: fileUrl,
 		pin,
 		...(note ? { pinNote: note } : {}),
+		...(!slug ? {} : { slug: slug.slug }),
+		...(slug?.note ? { slugNote: slug.note } : {}),
 		expireAt: upload.expireAt,
 		oneShot: upload.oneShot ?? false,
 		removable: upload.removable ?? false,
@@ -316,12 +405,14 @@ export default function plikExtension(pi: ExtensionAPI) {
 		name: "share_file",
 		label: "Share File",
 		description:
-			"Upload a local file to the user's Plik instance and return the upload page and direct download URLs, plus a short-lived PIN for the download URL when the PIN service is configured.",
+			"Upload a local file to the user's Plik instance and return the upload page and direct download URLs, a short-lived PIN for the download URL, and, on request, a human-readable slug that can later be repointed at a new upload.",
 		promptSnippet: "Share a local file through Plik",
 		promptGuidelines: [
 			"Write a short comment describing what the file is.",
 			"When the result has a pin, tell the human to open pin.page and enter pin.code, and say when it expires.",
 			"When pin is null, share the full URL only and do not mention PINs.",
+			"When the result has a slug, offer slug.url as the stable link and say whether it was created or repointed (created false).",
+			"When slug is null and slugNote is set, say the slug was not reserved and give its reason instead of implying it worked.",
 		],
 		parameters: Type.Object({
 			path: Type.String({ description: "Absolute path of the file to share" }),
@@ -346,12 +437,14 @@ export default function plikExtension(pi: ExtensionAPI) {
 		name: "share_text",
 		label: "Share Text",
 		description:
-			"Upload inline text as a named file to the user's Plik instance and return the upload page and direct download URLs, plus a short-lived PIN for the download URL when the PIN service is configured.",
+			"Upload inline text as a named file to the user's Plik instance and return the upload page and direct download URLs, a short-lived PIN for the download URL, and, on request, a human-readable slug that can later be repointed at a new upload.",
 		promptSnippet: "Share text through Plik",
 		promptGuidelines: [
 			"Write a short comment describing what the content is.",
 			"When the result has a pin, tell the human to open pin.page and enter pin.code, and say when it expires.",
 			"When pin is null, share the full URL only and do not mention PINs.",
+			"When the result has a slug, offer slug.url as the stable link and say whether it was created or repointed (created false).",
+			"When slug is null and slugNote is set, say the slug was not reserved and give its reason instead of implying it worked.",
 		],
 		parameters: Type.Object({
 			filename: Type.String({ description: "Name for the uploaded file (e.g. snippet.go)" }),
